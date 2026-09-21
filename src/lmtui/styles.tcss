@@ -77,3 +77,103 @@ Footer {
     width: 100%;
     margin-top: 1;
 }
+
+/* ------ AddToPlaylist modal ------ */
+
+AddToPlaylistScreen {
+    align: center middle;
+}
+
+#playlist-dialog {
+    width: 50;
+    height: auto;
+    max-height: 80%;
+    background: #181825;
+    border: round #cba6f7;
+    padding: 1 2;
+}
+
+#dialog-title {
+    color: #cba6f7;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#playlist-list {
+    height: auto;
+    max-height: 16;
+    background: #1e1e2e;
+    border: round #45475a;
+}
+
+PlaylistItem {
+    padding: 0 1;
+}
+
+PlaylistItem.--highlight {
+    background: #45475a;
+}
+
+#dialog-hint {
+    color: #6c7086;
+    margin-top: 1;
+    text-align: center;
+}
+
+/* ------ LibraryBrowser modal ------ */
+
+LibraryBrowserScreen {
+    background: #1e1e2e;
+}
+
+#library-layout {
+    height: 100%;
+    padding: 1 2;
+}
+
+#library-sidebar {
+    width: 30;
+    border: round #45475a;
+    background: #181825;
+    padding: 0 1;
+    margin-right: 1;
+}
+
+#library-sidebar-title {
+    color: #cba6f7;
+    text-style: bold;
+    padding: 1 0;
+}
+
+#library-playlists {
+    height: 1fr;
+    background: #181825;
+}
+
+#library-main {
+    width: 1fr;
+    border: round #45475a;
+    background: #181825;
+    padding: 0 1;
+}
+
+#library-tracks-title {
+    color: #cba6f7;
+    text-style: bold;
+    padding: 1 0;
+}
+
+#library-tracks {
+    height: 1fr;
+    background: #181825;
+}
+
+DataTable > .datatable--header {
+    background: #181825;
+    color: #cba6f7;
+}
+
+DataTable > .datatable--cursor {
+    background: #45475a;
+    color: #cdd6f4;
+}

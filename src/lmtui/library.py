@@ -40,9 +40,8 @@ def list_playlists(timeout: float = 5.0) -> list[str]:
 # Two-stage strategy ported from the user's `madd` zsh function:
 #   1. Try direct duplicate (works for owned/purchased tracks)
 #   2. On failure, add to library, poll for the entry, then duplicate
-#      the library instance into the playlist. This is required for
-#      Apple Music subscription (URL) tracks, which don't respond to
-#      a bare `duplicate ... to playlist`.
+#      the library instance into the playlist. Required for Apple
+#      Music subscription (URL) tracks.
 
 _ADD_TO_PLAYLIST_SCRIPT = '''
 on run argv
@@ -53,7 +52,7 @@ on run argv
         set trackName to name of t
         set trackArtist to artist of t
 
-        -- Attempt 1: direct duplicate. Works for owned/purchased tracks.
+        -- Attempt 1: direct duplicate.
         try
             duplicate t to playlist plName
             try
@@ -62,13 +61,12 @@ on run argv
             return "OK"
         end try
 
-        -- Attempt 2: URL/subscription track. Add to library first, then
-        -- duplicate the library instance to the playlist.
+        -- Attempt 2: subscription track. Add to library, poll, then
+        -- duplicate the library instance.
         try
             duplicate t to source "Library"
         end try
 
-        -- Wait up to ~15s for Music.app to surface the library entry.
         repeat 30 times
             delay 0.5
             try
@@ -95,6 +93,99 @@ def add_current_to_playlist(playlist_name: str, timeout: float = 20.0) -> bool:
     try:
         result = subprocess.run(
             ["osascript", "-e", _ADD_TO_PLAYLIST_SCRIPT, playlist_name],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+    return result.returncode == 0 and result.stdout.strip() == "OK"
+
+
+# ------ Playlist tracks ------
+# Emits one line per track, tab-separated. Leading index lets us say
+# `play track N of user playlist "X"` without re-fetching.
+
+_GET_PLAYLIST_TRACKS_SCRIPT = '''
+on run argv
+    set plName to item 1 of argv
+    tell application "Music"
+        set pl to user playlist plName
+        set out to ""
+        set i to 0
+        repeat with t in tracks of pl
+            set i to i + 1
+            set out to out & i & tab & (name of t) & tab & (artist of t) & tab & (album of t) & linefeed
+        end repeat
+        return out
+    end tell
+end run
+'''
+
+
+def get_playlist_tracks(playlist_name: str, timeout: float = 30.0) -> list[dict]:
+    """
+    Return the tracks in a user playlist as a list of dicts with keys
+    `index`, `name`, `artist`, `album`. The index is 1-based and can be
+    passed to `play_playlist_track`.
+    """
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", _GET_PLAYLIST_TRACKS_SCRIPT, playlist_name],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return []
+
+    if result.returncode != 0:
+        return []
+
+    tracks: list[dict] = []
+    for line in result.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        try:
+            idx = int(parts[0])
+        except ValueError:
+            continue
+        tracks.append({
+            "index": idx,
+            "name": parts[1],
+            "artist": parts[2],
+            "album": parts[3],
+        })
+    return tracks
+
+
+# ------ Play from playlist ------
+
+_PLAY_PLAYLIST_TRACK_SCRIPT = '''
+on run argv
+    set plName to item 1 of argv
+    set trackIdx to (item 2 of argv) as integer
+    tell application "Music"
+        play track trackIdx of user playlist plName
+    end tell
+    return "OK"
+end run
+'''
+
+
+def play_playlist_track(playlist_name: str, index: int, timeout: float = 5.0) -> bool:
+    """Start playback of track N (1-based) inside the given playlist."""
+    try:
+        result = subprocess.run(
+            [
+                "osascript",
+                "-e",
+                _PLAY_PLAYLIST_TRACK_SCRIPT,
+                playlist_name,
+                str(index),
+            ],
             capture_output=True,
             text=True,
             timeout=timeout,

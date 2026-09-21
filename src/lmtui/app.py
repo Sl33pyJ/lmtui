@@ -16,6 +16,14 @@ from lmtui.applescript import (
     volume_down,
     volume_up,
 )
+from lmtui.library import (
+    add_current_to_playlist,
+    get_playlist_tracks,
+    list_playlists,
+    play_playlist_track,
+)
+from lmtui.screens import AddToPlaylistScreen, LibraryBrowserScreen
+from lmtui.worker import MusicWorker
 
 
 # ------ Controller ------
@@ -23,6 +31,10 @@ from lmtui.applescript import (
 class MusicController:
     """Async wrapper around the synchronous AppleScript layer."""
 
+    def __init__(self) -> None:
+        self.worker = MusicWorker()
+
+    # Fast calls — safe on the default asyncio thread pool.
     async def now_playing(self) -> Track | None:
         return await asyncio.to_thread(get_now_playing)
 
@@ -43,6 +55,19 @@ class MusicController:
 
     async def volume_down(self) -> None:
         await asyncio.to_thread(volume_down)
+
+    async def list_playlists(self) -> list[str]:
+        return await asyncio.to_thread(list_playlists)
+
+    async def add_current_to_playlist(self, name: str) -> bool:
+        return await asyncio.to_thread(add_current_to_playlist, name)
+
+    # Slow calls — routed through the dedicated worker thread.
+    async def get_playlist_tracks(self, name: str) -> list[dict]:
+        return await self.worker.run(get_playlist_tracks, name)
+
+    async def play_playlist_track(self, name: str, index: int) -> bool:
+        return await self.worker.run(play_playlist_track, name, index)
 
 
 # ------ Album art ------
@@ -128,6 +153,8 @@ class LmTuiApp(App):
         ("]", "volume_up", "Vol +"),
         ("[", "volume_down", "Vol -"),
         ("s", "shuffle", "Shuffle"),
+        ("a", "add_to_playlist", "Add"),
+        ("l", "open_library", "Library"),
         ("r", "refresh", "Refresh"),
         ("q", "quit", "Quit"),
     ]
@@ -148,6 +175,9 @@ class LmTuiApp(App):
         asyncio.create_task(self.refresh_now_playing())
         self.set_interval(1.0, self.refresh_now_playing)
 
+    def on_unmount(self) -> None:
+        self.controller.worker.shutdown()
+
     async def refresh_now_playing(self) -> None:
         track = await self.controller.now_playing()
 
@@ -159,6 +189,8 @@ class LmTuiApp(App):
             art.track_key = ""
         else:
             art.track_key = f"{track.name}|{track.artist}"
+
+    # ------ Control actions ------
 
     def action_refresh(self) -> None:
         asyncio.create_task(self.refresh_now_playing())
@@ -184,3 +216,46 @@ class LmTuiApp(App):
     async def _control(self, action) -> None:
         await action()
         await self.refresh_now_playing()
+
+    # ------ Add-to-playlist action ------
+
+    def action_add_to_playlist(self) -> None:
+        asyncio.create_task(self._open_playlist_picker())
+
+    async def _open_playlist_picker(self) -> None:
+        track = self.query_one(NowPlayingPanel).track
+        if track is None:
+            self.notify("Nothing playing", severity="warning", timeout=2)
+            return
+
+        playlists = await self.controller.list_playlists()
+        if not playlists:
+            self.notify("No playlists found", severity="warning", timeout=2)
+            return
+
+        self.push_screen(
+            AddToPlaylistScreen(track, playlists),
+            callback=self._on_playlist_picked,
+        )
+
+    def _on_playlist_picked(self, playlist_name: str | None) -> None:
+        if playlist_name is None:
+            return
+        asyncio.create_task(self._add_to_playlist(playlist_name))
+
+    async def _add_to_playlist(self, playlist_name: str) -> None:
+        self.notify(f"Adding to \u201c{playlist_name}\u201d\u2026", timeout=2)
+        ok = await self.controller.add_current_to_playlist(playlist_name)
+        if ok:
+            self.notify(
+                f"♥  Added to \u201c{playlist_name}\u201d",
+                severity="information",
+                timeout=3,
+            )
+        else:
+            self.notify("Could not add track", severity="error", timeout=3)
+
+    # ------ Library browser action ------
+
+    def action_open_library(self) -> None:
+        self.push_screen(LibraryBrowserScreen(self.controller))
