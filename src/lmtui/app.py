@@ -227,9 +227,10 @@ class MusicController:
 # ------ Queue panel (left) ------
 
 class QueuePanel(Vertical):
-    """Persistent queue list showing the tracks after the current one."""
+    """Queue list: current track on top, then upcoming tracks."""
 
-    track_key: reactive[str] = reactive("")
+    current_track: reactive[Track | None] = reactive(None)
+    _last_key: str = ""
 
     def __init__(self, controller: MusicController, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -240,12 +241,11 @@ class QueuePanel(Vertical):
         with VerticalScroll(id="queue-scroll"):
             yield Static("", id="queue-content")
 
-    def watch_track_key(self, key: str) -> None:
-        if not key:
-            self.query_one("#queue-content", Static).update(
-                "[#6c7086](nothing playing)[/]"
-            )
+    def watch_current_track(self, track: Track | None) -> None:
+        key = f"{track.name}|{track.artist}" if track else ""
+        if key == self._last_key:
             return
+        self._last_key = key
         asyncio.create_task(self._load_queue())
 
     async def _load_queue(self) -> None:
@@ -255,25 +255,31 @@ class QueuePanel(Vertical):
         data = await self.controller.get_queue()
         tracks = data["tracks"]
         playlist = data["playlist"] or ""
-
-        if not tracks:
-            content.update("[#6c7086](queue is empty)[/]")
-            return
+        current = self.current_track
 
         lines: list[str] = []
+
         if playlist:
+            lines.append(f"[#6c7086]from[/] [#cba6f7]{escape(playlist)}[/]\n")
+
+        if current is not None:
+            lines.append("[#6c7086]▶ now playing[/]")
             lines.append(
-                f"[#6c7086]from[/] [#cba6f7]{escape(playlist)}[/]\n"
+                f"  [#cba6f7 bold]{escape(current.name)}[/]\n"
+                f"  [#cdd6f4]{escape(current.artist)}[/]\n"
             )
 
-        for i, t in enumerate(tracks, start=1):
-            name = escape(t["name"])
-            artist = escape(t["artist"])
-            marker = f"[#6c7086]{i:>2}.[/]"
-            lines.append(
-                f"{marker}  [#a6e3a1]{name}[/]\n"
-                f"      [#6c7086]{artist}[/]"
-            )
+        if tracks:
+            lines.append("[#6c7086]up next[/]")
+            for i, t in enumerate(tracks, start=1):
+                name = escape(t["name"])
+                artist = escape(t["artist"])
+                lines.append(
+                    f"  [#6c7086]{i:>2}.[/]  [#a6e3a1]{name}[/]\n"
+                    f"        [#6c7086]{artist}[/]"
+                )
+        else:
+            lines.append("[#6c7086](queue empty)[/]")
 
         content.update("\n".join(lines))
 
@@ -312,8 +318,7 @@ class LyricsPanel(Vertical):
 class SmallAlbumArt(Static):
     """
     Fixed-size album art for the now-playing bar. 8 cells wide renders
-    as 8 pixels square (4 lines tall) via half-blocks. Re-renders on
-    track change only.
+    as 8 pixels square (4 lines tall) via half-blocks.
     """
 
     track_key: reactive[str] = reactive("")
@@ -475,10 +480,7 @@ class LmTuiApp(App):
         bar.track = track
 
         queue = self.query_one(QueuePanel)
-        if track is None:
-            queue.track_key = ""
-        else:
-            queue.track_key = f"{track.name}|{track.artist}"
+        queue.current_track = track
 
     # ------ Control actions ------
 

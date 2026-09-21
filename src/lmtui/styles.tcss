@@ -33,16 +33,15 @@ Footer {
     height: 1fr;
 }
 
-/* ------ Left: queue panel ------
-   No border. Just a darker background so it reads as a distinct
-   region against the base. Padding handles breathing room. */
+/* ------ Left: queue panel (border only here) ------ */
 
 #queue-panel {
     width: 42%;
     min-width: 26;
     height: 100%;
     background: #181825;
-    padding: 1 2;
+    border: round #45475a;
+    padding: 0 1;
     margin-right: 1;
 }
 
@@ -50,6 +49,7 @@ Footer {
     color: #cba6f7;
     text-style: bold;
     height: 2;
+    padding: 1 0 0 0;
 }
 
 #queue-scroll {
@@ -62,7 +62,7 @@ Footer {
     padding: 0 0 1 0;
 }
 
-/* ------ Right column ------ */
+/* ------ Right column (no borders) ------ */
 
 #right-column {
     width: 1fr;
@@ -75,7 +75,7 @@ Footer {
     width: 100%;
     height: 3fr;
     background: #181825;
-    padding: 1 2;
+    padding: 0 1;
     margin-bottom: 1;
 }
 
@@ -83,6 +83,7 @@ Footer {
     color: #cba6f7;
     text-style: bold;
     height: 2;
+    padding: 1 0 0 0;
 }
 
 #viz-content {
@@ -96,13 +97,14 @@ Footer {
     width: 100%;
     height: 2fr;
     background: #181825;
-    padding: 1 2;
+    padding: 0 1;
 }
 
 #lyr-title {
     color: #cba6f7;
     text-style: bold;
     height: 2;
+    padding: 1 0 0 0;
 }
 
 #lyr-content {
@@ -160,8 +162,7 @@ Footer {
     margin-top: 1;
 }
 
-/* ------ AddToPlaylist modal ------
-   Keeps a border — modals benefit from a defined frame. */
+/* ------ AddToPlaylist modal ------ */
 
 AddToPlaylistScreen {
     align: center middle;
