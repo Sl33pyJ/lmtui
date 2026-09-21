@@ -3,6 +3,8 @@ import asyncio
 import random
 import subprocess
 
+from rich.markup import escape
+
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal
 from textual.reactive import reactive
@@ -10,6 +12,7 @@ from textual.widgets import Footer, Header, Input, Label, ProgressBar, Static
 
 from lmtui.applescript import (
     Track,
+    cycle_repeat,
     get_now_playing,
     next_track,
     play_pause,
@@ -37,7 +40,7 @@ from lmtui.screens import (
 from lmtui.worker import MusicWorker
 
 
-# ------ Shuffle query ------
+# ------ State queries ------
 
 def _read_shuffle() -> bool:
     """Return True if Music.app's shuffle is currently on."""
@@ -51,6 +54,21 @@ def _read_shuffle() -> bool:
     return r.returncode == 0 and r.stdout.strip().lower() == "true"
 
 
+def _read_repeat() -> str:
+    """Return Music.app's current repeat mode: 'off', 'all', or 'one'."""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", 'tell application "Music" to get song repeat'],
+            capture_output=True, text=True, timeout=3.0,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return "off"
+    if r.returncode != 0:
+        return "off"
+    val = r.stdout.strip().lower()
+    return val if val in ("off", "all", "one") else "off"
+
+
 # ------ Controller ------
 
 class MusicController:
@@ -60,18 +78,17 @@ class MusicController:
     Also owns lmtui's playback state: which playlist we're playing from
     and which index of that playlist is current. This is separate from
     whatever Music.app thinks, because Music.app's own track tracking
-    can't distinguish duplicate entries (same name+artist+album).
+    can't distinguish duplicate entries.
     """
 
     def __init__(self) -> None:
         self.worker = MusicWorker()
 
-        # Playback state. None until the user starts a track from
-        # lmtui's library browser or queue view.
         self._queue_playlist: str | None = None
-        self._queue_order: list[int] = []   # 1-based indices into the playlist
-        self._queue_pos: int = -1           # index into _queue_order
+        self._queue_order: list[int] = []
+        self._queue_pos: int = -1
         self._shuffle: bool = False
+        self._repeat: str = "off"
 
     # ------ Fast operations (default thread pool) ------
 
@@ -115,13 +132,6 @@ class MusicController:
     async def jump_to_track(
         self, playlist_name: str, index: int, total_tracks: int
     ) -> bool:
-        """
-        Play a specific track and set up queue state so subsequent
-        next/previous calls are reliable.
-
-        `total_tracks` is needed so we can build the full order for
-        shuffle and advance past the end.
-        """
         indices = list(range(1, total_tracks + 1))
 
         if self._shuffle and total_tracks > 1:
@@ -140,7 +150,6 @@ class MusicController:
         return await self.worker.run(play_playlist_track, playlist_name, index)
 
     async def next(self) -> None:
-        """Advance within the lmtui queue; fall back to scanning."""
         if self._can_step(forward=True):
             self._queue_pos += 1
             idx = self._queue_order[self._queue_pos]
@@ -150,7 +159,6 @@ class MusicController:
             return
 
         if self._shuffle and self._queue_playlist:
-            # Wrap: reshuffle the tail and restart.
             await self._reshuffle_from_current()
             if self._can_step(forward=True):
                 self._queue_pos += 1
@@ -160,7 +168,18 @@ class MusicController:
                 )
                 return
 
-        # No queue state or at the end: fall back.
+        if (
+            self._repeat == "all"
+            and self._queue_playlist
+            and self._queue_order
+        ):
+            self._queue_pos = 0
+            idx = self._queue_order[0]
+            await self.worker.run(
+                play_playlist_track, self._queue_playlist, idx
+            )
+            return
+
         ok = await asyncio.to_thread(smart_next)
         if not ok:
             await asyncio.to_thread(next_track)
@@ -174,7 +193,6 @@ class MusicController:
             )
             return
 
-        # At the top: restart current track, matching Music.app behavior.
         if self._queue_playlist and 0 <= self._queue_pos:
             idx = self._queue_order[self._queue_pos]
             await self.worker.run(
@@ -187,11 +205,6 @@ class MusicController:
             await asyncio.to_thread(previous_track)
 
     async def toggle_shuffle(self) -> None:
-        """
-        Toggle both lmtui's internal shuffle AND Music.app's shuffle so
-        the UI reflects reality. Our shuffle regenerates the order of
-        the tracks after the current position.
-        """
         await asyncio.to_thread(toggle_shuffle)
         self._shuffle = not self._shuffle
 
@@ -210,8 +223,11 @@ class MusicController:
             self._queue_order = all_indices
             self._queue_pos = current - 1
 
+    async def cycle_repeat(self) -> None:
+        await asyncio.to_thread(cycle_repeat)
+        self._repeat = await asyncio.to_thread(_read_repeat)
+
     async def _reshuffle_from_current(self) -> None:
-        """After reaching the end of a shuffled order, reshuffle from 1."""
         if not self._queue_playlist:
             return
         n = len(self._queue_order)
@@ -261,8 +277,29 @@ class AlbumArt(Static):
 
 # ------ Now Playing panel ------
 
+def _format_status(track: Track) -> str:
+    muted = "#6c7086"
+    active = "#a6e3a1"
+    mauve = "#cba6f7"
+
+    parts: list[str] = []
+
+    if track.playlist:
+        parts.append(f"[{muted}]from[/] [{mauve}]{escape(track.playlist)}[/]")
+
+    shuf_color = active if track.shuffle else muted
+    shuf_label = "on" if track.shuffle else "off"
+    parts.append(f"[{muted}]⇄[/] [{shuf_color}]{shuf_label}[/]")
+
+    rep_color = active if track.repeat != "off" else muted
+    rep_label = track.repeat or "off"
+    parts.append(f"[{muted}]⟳[/] [{rep_color}]{rep_label}[/]")
+
+    return f"  [{muted}]·[/]  ".join(parts)
+
+
 class NowPlayingPanel(Static):
-    """Displays current track, artist, album, and playback progress."""
+    """Displays current track, artist, album, playback progress, and status."""
 
     track: reactive[Track | None] = reactive(None)
 
@@ -272,18 +309,21 @@ class NowPlayingPanel(Static):
         yield Static("", id="np-artist")
         yield Static("", id="np-album")
         yield ProgressBar(total=100, show_eta=False, id="np-progress")
+        yield Static("", id="np-status")
 
     def watch_track(self, track: Track | None) -> None:
         track_w  = self.query_one("#np-track",    Static)
         artist_w = self.query_one("#np-artist",   Static)
         album_w  = self.query_one("#np-album",    Static)
         prog_w   = self.query_one("#np-progress", ProgressBar)
+        stat_w   = self.query_one("#np-status",   Static)
 
         if track is None:
             track_w.update("— nothing playing —")
             artist_w.update("")
             album_w.update("")
             prog_w.progress = 0
+            stat_w.update("")
             return
 
         track_w.update(track.name)
@@ -295,6 +335,8 @@ class NowPlayingPanel(Static):
             prog_w.progress = min(pct, 100.0)
         else:
             prog_w.progress = 0.0
+
+        stat_w.update(_format_status(track))
 
 
 # ------ Main application ------
@@ -313,16 +355,17 @@ class LmTuiApp(App):
         ("]", "volume_up", "Vol +"),
         ("[", "volume_down", "Vol -"),
         ("s", "shuffle", "Shuffle"),
+        ("r", "repeat", "Repeat"),
         ("a", "add_to_playlist", "Add"),
         ("l", "open_library", "Library"),
         ("u", "open_queue", "Up Next"),
-        ("r", "refresh", "Refresh"),
+        ("ctrl+r", "refresh", "Refresh"),
         ("q", "quit", "Quit"),
     ]
 
     INPUT_SENSITIVE_ACTIONS = {
         "play_pause", "next_track", "previous_track",
-        "volume_up", "volume_down", "shuffle",
+        "volume_up", "volume_down", "shuffle", "repeat",
         "add_to_playlist", "open_library", "open_queue", "refresh",
     }
 
@@ -379,6 +422,9 @@ class LmTuiApp(App):
 
     def action_shuffle(self) -> None:
         asyncio.create_task(self._control(self.controller.toggle_shuffle))
+
+    def action_repeat(self) -> None:
+        asyncio.create_task(self._control(self.controller.cycle_repeat))
 
     def action_volume_up(self) -> None:
         asyncio.create_task(self._control(self.controller.volume_up))

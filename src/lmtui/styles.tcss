@@ -236,3 +236,10 @@ QueueScreen DataTable > .datatable--cursor {
     background: #45475a;
     color: #cdd6f4;
 }
+
+/* ------ Now Playing status line ------ */
+
+#np-status {
+    color: #6c7086;
+    margin-top: 1;
+}
