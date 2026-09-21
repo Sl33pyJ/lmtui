@@ -23,13 +23,33 @@ Footer {
     padding: 1 2;
 }
 
+#now-playing-row {
+    height: auto;
+}
+
+/* ------ Album art panel ------ */
+
+#album-art {
+    width: 44;
+    height: auto;
+    border: round #45475a;
+    background: #181825;
+    padding: 1;
+    margin-right: 1;
+}
+
+#art-content {
+    width: 40;
+    height: auto;
+}
+
 /* ------ Now Playing panel ------ */
 
 #now-playing {
     border: round #45475a;
     background: #181825;
     padding: 1 2;
-    width: 100%;
+    width: 1fr;
     height: auto;
 }
 

@@ -17,7 +17,6 @@ from lmtui.applescript import (
     volume_up,
 )
 
-
 # ------ Controller ------
 
 class MusicController:
@@ -44,11 +43,15 @@ class MusicController:
     async def volume_down(self) -> None:
         await asyncio.to_thread(volume_down)
 
-
-# ------ Album art ------
+# ------ Now Playing panel ------
 
 class AlbumArt(Static):
-    """Renders current track's artwork as Unicode half-blocks."""
+    """
+    Renders the current track's album art as Unicode half-blocks.
+
+    Re-rendering is expensive (AppleScript + Pillow + string building),
+    so we key off `track_key`. When the key is unchanged, nothing runs.
+    """
 
     track_key: reactive[str] = reactive("")
 
@@ -62,9 +65,11 @@ class AlbumArt(Static):
         asyncio.create_task(self._render_art())
 
     async def _render_art(self) -> None:
+        # Import locally to keep the module-level import list clean.
         from lmtui.artwork import extract_artwork
         from lmtui.halfblock import image_to_halfblocks
 
+        # Both of these are blocking — run off the UI thread.
         path = await asyncio.to_thread(extract_artwork)
         if path is None:
             self.query_one("#art-content", Static).update("")
@@ -73,11 +78,8 @@ class AlbumArt(Static):
         rendered = await asyncio.to_thread(image_to_halfblocks, path, 40)
         self.query_one("#art-content", Static).update(rendered)
 
-
-# ------ Now Playing panel ------
-
 class NowPlayingPanel(Static):
-    """Displays current track, artist, album, and playback progress."""
+    """Displays the current track, artist, album, and playback progress."""
 
     track: reactive[Track | None] = reactive(None)
 
@@ -139,9 +141,7 @@ class LmTuiApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Container(id="main"):
-            with Horizontal(id="now-playing-row"):
-                yield AlbumArt(id="album-art")
-                yield NowPlayingPanel(id="now-playing")
+            yield NowPlayingPanel(id="now-playing")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -150,15 +150,8 @@ class LmTuiApp(App):
 
     async def refresh_now_playing(self) -> None:
         track = await self.controller.now_playing()
-
         panel = self.query_one(NowPlayingPanel)
         panel.track = track
-
-        art = self.query_one(AlbumArt)
-        if track is None:
-            art.track_key = ""
-        else:
-            art.track_key = f"{track.name}|{track.artist}"
 
     def action_refresh(self) -> None:
         asyncio.create_task(self.refresh_now_playing())
@@ -182,5 +175,6 @@ class LmTuiApp(App):
         asyncio.create_task(self._control(self.controller.volume_down))
 
     async def _control(self, action) -> None:
+        """Run a control action, then immediately refresh the panel."""
         await action()
         await self.refresh_now_playing()
