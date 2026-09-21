@@ -6,9 +6,9 @@ import subprocess
 from rich.markup import escape
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Input, Label, Static
+from textual.widgets import Footer, Header, Input, Label, ProgressBar, Static
 
 from lmtui.applescript import (
     Track,
@@ -40,14 +40,7 @@ from lmtui.screens import (
 from lmtui.worker import MusicWorker
 
 
-# ------ Helpers ------
-
-def _fmt_time(seconds: int) -> str:
-    if seconds < 0:
-        seconds = 0
-    m, s = divmod(seconds, 60)
-    return f"{m}:{s:02d}"
-
+# ------ State queries ------
 
 def _read_shuffle() -> bool:
     try:
@@ -88,6 +81,7 @@ class MusicController:
         self._shuffle: bool = False
         self._repeat: str = "off"
 
+    # Fast operations
     async def now_playing(self) -> Track | None:
         return await asyncio.to_thread(get_now_playing)
 
@@ -112,6 +106,7 @@ class MusicController:
     async def shuffle_enabled(self) -> bool:
         return await asyncio.to_thread(_read_shuffle)
 
+    # Slow operations (worker thread)
     async def get_playlist_tracks(self, name: str) -> list[dict]:
         return await self.worker.run(get_playlist_tracks, name)
 
@@ -121,6 +116,7 @@ class MusicController:
     async def get_queue(self) -> dict:
         return await self.worker.run(get_queue)
 
+    # Playback state
     async def jump_to_track(
         self, playlist_name: str, index: int, total_tracks: int
     ) -> bool:
@@ -224,32 +220,156 @@ class MusicController:
         return self._queue_pos > 0
 
 
-# ------ Queue panel (left) ------
+# ------ Album art ------
 
-class QueuePanel(Vertical):
-    """Persistent queue list showing the tracks after the current one."""
+class AlbumArt(Static):
+    """
+    iPod-style "screen" containing the current track's artwork.
+
+    The art is rendered at the exact width of the inner screen region,
+    so it lines up flush against the bezel. Rerenders on track change
+    and on window resize.
+    """
 
     track_key: reactive[str] = reactive("")
-
-    def __init__(self, controller: MusicController, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.controller = controller
+    _last_width: int = 0
 
     def compose(self) -> ComposeResult:
-        yield Label("♪ Queue", id="queue-title")
-        with VerticalScroll(id="queue-scroll"):
-            yield Static("", id="queue-content")
+        with Container(id="art-screen"):
+            yield Static("", id="art-content")
+
+    def _current_width(self) -> int:
+        try:
+            content = self.query_one("#art-content", Static)
+            w = content.content_size.width
+            if w > 0:
+                return max(w, 8)
+        except Exception:
+            pass
+        return 30
+
+    def on_resize(self, event) -> None:
+        width = self._current_width()
+        if abs(width - self._last_width) < 2:
+            return
+        self._last_width = width
+        if self.track_key:
+            asyncio.create_task(self._render_art())
 
     def watch_track_key(self, key: str) -> None:
         if not key:
-            self.query_one("#queue-content", Static).update(
-                "[#6c7086](nothing playing)[/]"
-            )
+            self.query_one("#art-content", Static).update("")
             return
-        asyncio.create_task(self._load_queue())
+        self._last_width = self._current_width()
+        asyncio.create_task(self._render_art())
 
-    async def _load_queue(self) -> None:
-        content = self.query_one("#queue-content", Static)
+    async def _render_art(self) -> None:
+        from lmtui.artwork import extract_artwork
+        from lmtui.halfblock import image_to_halfblocks
+
+        path = await asyncio.to_thread(extract_artwork)
+        if path is None:
+            self.query_one("#art-content", Static).update("")
+            return
+
+        width = self._current_width()
+        self._last_width = width
+        rendered = await asyncio.to_thread(image_to_halfblocks, path, width)
+        self.query_one("#art-content", Static).update(rendered)
+
+
+# ------ Now Playing info (below the artwork) ------
+
+def _format_status(track: Track) -> str:
+    muted = "#6c7086"
+    active = "#a6e3a1"
+    mauve = "#cba6f7"
+
+    parts: list[str] = []
+
+    if track.playlist:
+        parts.append(f"[{muted}]from[/] [{mauve}]{escape(track.playlist)}[/]")
+
+    shuf_color = active if track.shuffle else muted
+    shuf_label = "on" if track.shuffle else "off"
+    parts.append(f"[{muted}]⇄[/] [{shuf_color}]{shuf_label}[/]")
+
+    rep_color = active if track.repeat != "off" else muted
+    rep_label = track.repeat or "off"
+    parts.append(f"[{muted}]⟳[/] [{rep_color}]{rep_label}[/]")
+
+    return f"  [{muted}]·[/]  ".join(parts)
+
+
+class NowPlayingInfo(Static):
+    """Track title, artist, album, progress bar, and status line."""
+
+    track: reactive[Track | None] = reactive(None)
+
+    def compose(self) -> ComposeResult:
+        yield Label("♪ Now Playing", id="np-title")
+        yield Static("— nothing playing —", id="np-track")
+        yield Static("", id="np-artist")
+        yield Static("", id="np-album")
+        yield ProgressBar(total=100, show_eta=False, id="np-progress")
+        yield Static("", id="np-status")
+
+    def watch_track(self, track: Track | None) -> None:
+        track_w  = self.query_one("#np-track",    Static)
+        artist_w = self.query_one("#np-artist",   Static)
+        album_w  = self.query_one("#np-album",    Static)
+        prog_w   = self.query_one("#np-progress", ProgressBar)
+        stat_w   = self.query_one("#np-status",   Static)
+
+        if track is None:
+            track_w.update("— nothing playing —")
+            artist_w.update("")
+            album_w.update("")
+            prog_w.progress = 0
+            stat_w.update("")
+            return
+
+        track_w.update(track.name)
+        artist_w.update(track.artist)
+        album_w.update(track.album)
+
+        if track.duration > 0:
+            pct = (track.position / track.duration) * 100
+            prog_w.progress = min(pct, 100.0)
+        else:
+            prog_w.progress = 0.0
+
+        stat_w.update(_format_status(track))
+
+
+# ------ Up Next panel (right side) ------
+
+class UpNextPanel(Static):
+    """
+    Shows the next several tracks in the playing playlist.
+
+    Reloads when the track changes, not on the 1Hz poll — the underlying
+    AppleScript scan is not free.
+    """
+
+    track_key: reactive[str] = reactive("")
+
+    def __init__(self, controller: MusicController) -> None:
+        super().__init__()
+        self.controller = controller
+
+    def compose(self) -> ComposeResult:
+        yield Label("♪ Up Next", id="up-next-title")
+        yield Static("", id="up-next-content")
+
+    def watch_track_key(self, key: str) -> None:
+        if not key:
+            self.query_one("#up-next-content", Static).update("")
+            return
+        asyncio.create_task(self._load())
+
+    async def _load(self) -> None:
+        content = self.query_one("#up-next-content", Static)
         content.update("[#6c7086]loading…[/]")
 
         data = await self.controller.get_queue()
@@ -257,157 +377,22 @@ class QueuePanel(Vertical):
         playlist = data["playlist"] or ""
 
         if not tracks:
-            content.update("[#6c7086](queue is empty)[/]")
+            content.update("[#6c7086](no upcoming tracks)[/]")
             return
 
-        lines: list[str] = []
-        if playlist:
-            lines.append(
-                f"[#6c7086]from[/] [#cba6f7]{escape(playlist)}[/]\n"
-            )
-
-        for i, t in enumerate(tracks, start=1):
+        lines = []
+        for t in tracks[:12]:
             name = escape(t["name"])
             artist = escape(t["artist"])
-            marker = f"[#6c7086]{i:>2}.[/]"
             lines.append(
-                f"{marker}  [#a6e3a1]{name}[/]\n"
-                f"      [#6c7086]{artist}[/]"
+                f"[#a6e3a1]{name}[/]  [#6c7086]—[/]  [#cdd6f4]{artist}[/]"
             )
 
-        content.update("\n".join(lines))
-
-
-# ------ Visualizer panel (right top) ------
-
-class VisualizerPanel(Vertical):
-    """Placeholder for a cava-driven visualizer."""
-
-    def compose(self) -> ComposeResult:
-        yield Label("♪ Visualizer", id="viz-title")
-        yield Static(
-            "[#6c7086]cava integration coming soon\n\n"
-            "meanwhile, run[/] [#cba6f7]cava[/] "
-            "[#6c7086]in a split pane[/]",
-            id="viz-content",
+        header = (
+            f"[#6c7086]from[/] [#cba6f7]{escape(playlist)}[/]\n\n"
+            if playlist else ""
         )
-
-
-# ------ Lyrics panel (right bottom) ------
-
-class LyricsPanel(Vertical):
-    """Placeholder for LRCLIB-fetched lyrics."""
-
-    def compose(self) -> ComposeResult:
-        yield Label("♪ Lyrics", id="lyr-title")
-        yield Static(
-            "[#6c7086]LRCLIB integration coming soon\n\n"
-            "synced lyrics will highlight the current line[/]",
-            id="lyr-content",
-        )
-
-
-# ------ Small album art (for the bar) ------
-
-class SmallAlbumArt(Static):
-    """
-    Fixed-size album art for the now-playing bar. 8 cells wide renders
-    as 8 pixels square (4 lines tall) via half-blocks. Re-renders on
-    track change only.
-    """
-
-    track_key: reactive[str] = reactive("")
-    WIDTH_CELLS = 8
-
-    def compose(self) -> ComposeResult:
-        yield Static("", id="np-art-content")
-
-    def watch_track_key(self, key: str) -> None:
-        if not key:
-            self.query_one("#np-art-content", Static).update("")
-            return
-        asyncio.create_task(self._load_art())
-
-    async def _load_art(self) -> None:
-        from lmtui.artwork import extract_artwork
-        from lmtui.halfblock import image_to_halfblocks
-
-        path = await asyncio.to_thread(extract_artwork)
-        if path is None:
-            self.query_one("#np-art-content", Static).update("")
-            return
-
-        rendered = await asyncio.to_thread(
-            image_to_halfblocks, path, self.WIDTH_CELLS
-        )
-        self.query_one("#np-art-content", Static).update(rendered)
-
-
-# ------ Now playing bar (bottom) ------
-
-class NowPlayingBar(Container):
-    """Full-width bottom strip: small art + track info + progress + state."""
-
-    track: reactive[Track | None] = reactive(None)
-
-    def compose(self) -> ComposeResult:
-        with Horizontal(id="np-bar-inner"):
-            yield SmallAlbumArt(id="np-art")
-            with Vertical(id="np-bar-text"):
-                yield Static("", id="np-line1")
-                yield Static("", id="np-line2")
-
-    def watch_track(self, track: Track | None) -> None:
-        line1 = self.query_one("#np-line1", Static)
-        line2 = self.query_one("#np-line2", Static)
-        art = self.query_one(SmallAlbumArt)
-
-        if track is None:
-            line1.update("[#6c7086]▶  — nothing playing —[/]")
-            line2.update("")
-            art.track_key = ""
-            return
-
-        art.track_key = f"{track.name}|{track.artist}"
-
-        shuf = (
-            "[#a6e3a1]⇄ on[/]" if track.shuffle
-            else "[#6c7086]⇄ off[/]"
-        )
-        rep_state = track.repeat or "off"
-        rep = (
-            f"[#a6e3a1]⟳ {rep_state}[/]" if rep_state != "off"
-            else "[#6c7086]⟳ off[/]"
-        )
-        src = (
-            f"   [#6c7086]from[/] [#cba6f7]{escape(track.playlist)}[/]"
-            if track.playlist else ""
-        )
-
-        line1.update(
-            f"[#cba6f7]▶[/]  "
-            f"[#a6e3a1]{escape(track.name)}[/]  "
-            f"[#6c7086]—[/]  "
-            f"[#cdd6f4]{escape(track.artist)}[/]"
-            f"{src}      {shuf}  {rep}"
-        )
-
-        pos = track.position
-        dur = track.duration
-        bar_w = 50
-        if dur > 0:
-            filled = int((pos / dur) * bar_w)
-            filled = max(0, min(filled, bar_w))
-        else:
-            filled = 0
-        bar = (
-            "[#cba6f7]" + "▬" * filled + "[/]"
-            + "[#45475a]" + "░" * (bar_w - filled) + "[/]"
-        )
-
-        line2.update(
-            f"[#6c7086]{_fmt_time(pos):>4}[/]  {bar}  [#6c7086]{_fmt_time(dur)}[/]"
-        )
+        content.update(header + "\n".join(lines))
 
 
 # ------ Main application ------
@@ -429,7 +414,7 @@ class LmTuiApp(App):
         ("r", "repeat", "Repeat"),
         ("a", "add_to_playlist", "Add"),
         ("l", "open_library", "Library"),
-        ("u", "open_queue", "Queue"),
+        ("u", "open_queue", "Up Next"),
         ("ctrl+r", "refresh", "Refresh"),
         ("q", "quit", "Quit"),
     ]
@@ -453,12 +438,12 @@ class LmTuiApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         with Container(id="main"):
-            with Horizontal(id="body-row"):
-                yield QueuePanel(self.controller, id="queue-panel")
-                with Vertical(id="right-column"):
-                    yield VisualizerPanel(id="visualizer-panel")
-                    yield LyricsPanel(id="lyrics-panel")
-            yield NowPlayingBar(id="now-playing-bar")
+            with Horizontal(id="main-row"):
+                with Vertical(id="left-panel"):
+                    yield AlbumArt(id="album-art")
+                    yield NowPlayingInfo(id="np-info")
+                with Vertical(id="right-panel"):
+                    yield UpNextPanel(self.controller, id="up-next")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -471,14 +456,18 @@ class LmTuiApp(App):
     async def refresh_now_playing(self) -> None:
         track = await self.controller.now_playing()
 
-        bar = self.query_one(NowPlayingBar)
-        bar.track = track
+        info = self.query_one(NowPlayingInfo)
+        info.track = track
 
-        queue = self.query_one(QueuePanel)
+        art = self.query_one(AlbumArt)
+        up_next = self.query_one(UpNextPanel)
         if track is None:
-            queue.track_key = ""
+            art.track_key = ""
+            up_next.track_key = ""
         else:
-            queue.track_key = f"{track.name}|{track.artist}"
+            key = f"{track.name}|{track.artist}"
+            art.track_key = key
+            up_next.track_key = key
 
     # ------ Control actions ------
 
@@ -516,7 +505,7 @@ class LmTuiApp(App):
         asyncio.create_task(self._open_playlist_picker())
 
     async def _open_playlist_picker(self) -> None:
-        track = self.query_one(NowPlayingBar).track
+        track = self.query_one(NowPlayingInfo).track
         if track is None:
             self.notify("Nothing playing", severity="warning", timeout=2)
             return
