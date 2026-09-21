@@ -39,3 +39,4 @@ credentials/
 # ------ Obsidian vault (should never be committed here) ------
 docs/vault/
 .obsidian/
+.envrc
