@@ -6,8 +6,16 @@ from textual.containers import Container
 from textual.reactive import reactive
 from textual.widgets import Footer, Header, Label, ProgressBar, Static
 
-from lmtui.applescript import Track, get_now_playing
-
+from lmtui.applescript import (
+    Track,
+    get_now_playing,
+    next_track,
+    play_pause,
+    previous_track,
+    toggle_shuffle,
+    volume_down,
+    volume_up,
+)
 
 # ------ Controller ------
 
@@ -17,6 +25,23 @@ class MusicController:
     async def now_playing(self) -> Track | None:
         return await asyncio.to_thread(get_now_playing)
 
+    async def play_pause(self) -> None:
+        await asyncio.to_thread(play_pause)
+
+    async def next(self) -> None:
+        await asyncio.to_thread(next_track)
+
+    async def previous(self) -> None:
+        await asyncio.to_thread(previous_track)
+
+    async def toggle_shuffle(self) -> None:
+        await asyncio.to_thread(toggle_shuffle)
+
+    async def volume_up(self) -> None:
+        await asyncio.to_thread(volume_up)
+
+    async def volume_down(self) -> None:
+        await asyncio.to_thread(volume_down)
 
 # ------ Now Playing panel ------
 
@@ -66,8 +91,14 @@ class LmTuiApp(App):
     SUB_TITLE = "Lossless Music TUI"
 
     BINDINGS = [
-        ("q", "quit", "Quit"),
+        ("space", "play_pause", "Play/Pause"),
+        ("n", "next_track", "Next"),
+        ("p", "previous_track", "Prev"),
+        ("]", "volume_up", "Vol +"),
+        ("[", "volume_down", "Vol -"),
+        ("s", "shuffle", "Shuffle"),
         ("r", "refresh", "Refresh"),
+        ("q", "quit", "Quit"),
     ]
 
     def __init__(self) -> None:
@@ -91,3 +122,26 @@ class LmTuiApp(App):
 
     def action_refresh(self) -> None:
         asyncio.create_task(self.refresh_now_playing())
+
+    def action_play_pause(self) -> None:
+        asyncio.create_task(self._control(self.controller.play_pause))
+
+    def action_next_track(self) -> None:
+        asyncio.create_task(self._control(self.controller.next))
+
+    def action_previous_track(self) -> None:
+        asyncio.create_task(self._control(self.controller.previous))
+
+    def action_shuffle(self) -> None:
+        asyncio.create_task(self._control(self.controller.toggle_shuffle))
+
+    def action_volume_up(self) -> None:
+        asyncio.create_task(self._control(self.controller.volume_up))
+
+    def action_volume_down(self) -> None:
+        asyncio.create_task(self._control(self.controller.volume_down))
+
+    async def _control(self, action) -> None:
+        """Run a control action, then immediately refresh the panel."""
+        await action()
+        await self.refresh_now_playing()
