@@ -290,3 +290,98 @@ class LibraryBrowserScreen(ModalScreen):
 
     def action_dismiss_modal(self) -> None:
         self.dismiss()
+
+
+# ------ Queue modal ------
+
+class QueueScreen(ModalScreen):
+    """
+    Shows the tracks after the current one in the playing playlist.
+
+    Note: this is playlist order, not true playback order. In shuffle
+    mode the actual order will differ — the header reflects that.
+    """
+
+    BINDINGS = [
+        ("escape", "dismiss_modal", "Close"),
+        ("q", "dismiss_modal", "Close"),
+        ("r", "refresh_queue", "Refresh"),
+    ]
+
+    def __init__(self, controller) -> None:
+        super().__init__()
+        self.controller = controller
+        self._playlist: str = ""
+        self._tracks: list[dict] = []
+        self._shuffled: bool = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="queue-layout"):
+            yield Static("Up Next", id="queue-title")
+            yield Static("Loading\u2026", id="queue-subtitle")
+            yield DataTable(id="queue-tracks", cursor_type="row")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#queue-tracks", DataTable)
+        table.add_columns("#", "Title", "Artist", "Album")
+        asyncio.create_task(self._load_queue())
+
+    async def _load_queue(self) -> None:
+        subtitle = self.query_one("#queue-subtitle", Static)
+        table = self.query_one("#queue-tracks", DataTable)
+
+        subtitle.update("Loading\u2026")
+        table.clear()
+
+        # Shuffle state is cheap to query — read it in parallel with the
+        # slower queue fetch.
+        shuffled = await self.controller.shuffle_enabled()
+
+        data = await self.controller.get_queue()
+        self._playlist = data["playlist"] or ""
+        self._tracks = data["tracks"]
+        self._shuffled = shuffled
+
+        if not self._playlist:
+            subtitle.update(
+                "No queue available \u2014 nothing playing or no "
+                "playlist context"
+            )
+            return
+
+        for t in self._tracks:
+            table.add_row(
+                str(t["index"]),
+                t["name"],
+                t["artist"],
+                t["album"],
+            )
+
+        suffix = " \u00b7 shuffled (order may differ)" if self._shuffled else ""
+        subtitle.update(
+            f"From \u201c{self._playlist}\u201d \u2014 "
+            f"{len(self._tracks)} upcoming{suffix}"
+        )
+        table.focus()
+
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        row = event.cursor_row
+        if row < 0 or row >= len(self._tracks):
+            return
+        track = self._tracks[row]
+        asyncio.create_task(self._jump_to(track["index"]))
+
+    async def _jump_to(self, index: int) -> None:
+        ok = await self.controller.play_playlist_track(self._playlist, index)
+        if not ok:
+            self.notify("Could not jump to track", severity="error", timeout=3)
+            return
+        # Reload — the current track has changed, so "upcoming" is now
+        # different.
+        await self._load_queue()
+
+    def action_refresh_queue(self) -> None:
+        asyncio.create_task(self._load_queue())
+
+    def action_dismiss_modal(self) -> None:
+        self.dismiss()

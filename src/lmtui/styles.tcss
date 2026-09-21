@@ -198,3 +198,41 @@ DataTable > .datatable--cursor {
 #library-tracks {
     scrollbar-size-horizontal: 0;
 }
+/* ------ Queue modal ------ */
+
+QueueScreen {
+    background: #1e1e2e;
+}
+
+#queue-layout {
+    height: 100%;
+    padding: 1 2;
+}
+
+#queue-title {
+    color: #cba6f7;
+    text-style: bold;
+    padding: 1 0 0 0;
+}
+
+#queue-subtitle {
+    color: #6c7086;
+    padding: 0 0 1 0;
+}
+
+#queue-tracks {
+    height: 1fr;
+    background: #181825;
+    border: round #45475a;
+    scrollbar-size-horizontal: 0;
+}
+
+QueueScreen DataTable > .datatable--header {
+    background: #181825;
+    color: #cba6f7;
+}
+
+QueueScreen DataTable > .datatable--cursor {
+    background: #45475a;
+    color: #cdd6f4;
+}

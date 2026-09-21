@@ -98,8 +98,6 @@ def add_current_to_playlist(playlist_name: str, timeout: float = 20.0) -> bool:
 
 
 # ------ Duplicate detection ------
-# Returns the number of times the currently-playing track appears in the
-# named playlist. Used to warn the user before adding a duplicate.
 
 _CURRENT_COUNT_SCRIPT = '''
 on run argv
@@ -196,6 +194,11 @@ def get_playlist_tracks(playlist_name: str, timeout: float = 30.0) -> list[dict]
 
 
 # ------ Play from playlist ------
+# play_playlist_track jumps directly to track N.
+# smart_next / smart_previous read the current playlist context and
+# compute the target track ourselves, because Music.app's native
+# `next track` and `previous track` don't respect playlist order when
+# a track was played directly.
 
 _PLAY_PLAYLIST_TRACK_SCRIPT = '''
 on run argv
@@ -208,9 +211,55 @@ on run argv
 end run
 '''
 
+_SMART_STEP_SCRIPT = '''
+on run argv
+    set direction to item 1 of argv
+    tell application "Music"
+        if player state is stopped then return "STOPPED"
+
+        try
+            set pl to current playlist
+        on error
+            return "NO_CONTEXT"
+        end try
+
+        set curName to name of current track
+        set curArtist to artist of current track
+        set curIdx to 0
+        set i to 0
+        repeat with t in tracks of pl
+            set i to i + 1
+            if (name of t is curName) and (artist of t is curArtist) then
+                set curIdx to i
+                exit repeat
+            end if
+        end repeat
+
+        if curIdx is 0 then return "NOT_FOUND"
+
+        set trackCount to count of tracks of pl
+
+        if direction is "next" then
+            if curIdx >= trackCount then return "END_OF_PLAYLIST"
+            play track (curIdx + 1) of pl
+            return "OK"
+        else if direction is "previous" then
+            if curIdx <= 1 then
+                play track curIdx of pl
+                return "OK"
+            end if
+            play track (curIdx - 1) of pl
+            return "OK"
+        end if
+
+        return "BAD_DIRECTION"
+    end tell
+end run
+'''
+
 
 def play_playlist_track(playlist_name: str, index: int, timeout: float = 5.0) -> bool:
-    """Start playback of track N (1-based) inside the given playlist."""
+    """Jump directly to track N (1-based) of a user playlist."""
     try:
         result = subprocess.run(
             ["osascript", "-e", _PLAY_PLAYLIST_TRACK_SCRIPT, playlist_name, str(index)],
@@ -220,13 +269,38 @@ def play_playlist_track(playlist_name: str, index: int, timeout: float = 5.0) ->
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return False
+    return result.returncode == 0 and result.stdout.strip() == "OK"
 
+
+def smart_next(timeout: float = 5.0) -> bool:
+    """Advance one track within the current playlist context."""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", _SMART_STEP_SCRIPT, "next"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "OK"
+
+
+def smart_previous(timeout: float = 5.0) -> bool:
+    """Step back one track within the current playlist context."""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", _SMART_STEP_SCRIPT, "previous"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
     return result.returncode == 0 and result.stdout.strip() == "OK"
 
 
 # ------ Remove from playlist ------
-# Removes the playlist entry. The library copy is untouched, and the
-# track's loved status stays as-is.
 
 _REMOVE_PLAYLIST_TRACK_SCRIPT = '''
 on run argv

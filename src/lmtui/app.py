@@ -1,5 +1,6 @@
 # ------ Imports ------
 import asyncio
+import subprocess
 
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal
@@ -23,9 +24,30 @@ from lmtui.library import (
     list_playlists,
     play_playlist_track,
     remove_playlist_track,
+    smart_next,
+    smart_previous,
 )
-from lmtui.screens import AddToPlaylistScreen, LibraryBrowserScreen
+from lmtui.queue import get_queue
+from lmtui.screens import (
+    AddToPlaylistScreen,
+    LibraryBrowserScreen,
+    QueueScreen,
+)
 from lmtui.worker import MusicWorker
+
+
+# ------ Shuffle query ------
+
+def _read_shuffle() -> bool:
+    """Return True if Music.app's shuffle is currently on."""
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", 'tell application "Music" to get shuffle enabled'],
+            capture_output=True, text=True, timeout=3.0,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    return r.returncode == 0 and r.stdout.strip().lower() == "true"
 
 
 # ------ Controller ------
@@ -44,10 +66,15 @@ class MusicController:
         await asyncio.to_thread(play_pause)
 
     async def next(self) -> None:
-        await asyncio.to_thread(next_track)
+        """Playlist-aware next; falls back to native if no context."""
+        ok = await asyncio.to_thread(smart_next)
+        if not ok:
+            await asyncio.to_thread(next_track)
 
     async def previous(self) -> None:
-        await asyncio.to_thread(previous_track)
+        ok = await asyncio.to_thread(smart_previous)
+        if not ok:
+            await asyncio.to_thread(previous_track)
 
     async def toggle_shuffle(self) -> None:
         await asyncio.to_thread(toggle_shuffle)
@@ -67,6 +94,9 @@ class MusicController:
     async def current_track_count_in(self, name: str) -> int:
         return await asyncio.to_thread(current_track_count_in, name)
 
+    async def shuffle_enabled(self) -> bool:
+        return await asyncio.to_thread(_read_shuffle)
+
     # Slow calls — routed through the dedicated worker thread.
     async def get_playlist_tracks(self, name: str) -> list[dict]:
         return await self.worker.run(get_playlist_tracks, name)
@@ -76,6 +106,9 @@ class MusicController:
 
     async def remove_playlist_track(self, name: str, index: int) -> bool:
         return await self.worker.run(remove_playlist_track, name, index)
+
+    async def get_queue(self) -> dict:
+        return await self.worker.run(get_queue)
 
 
 # ------ Album art ------
@@ -163,6 +196,7 @@ class LmTuiApp(App):
         ("s", "shuffle", "Shuffle"),
         ("a", "add_to_playlist", "Add"),
         ("l", "open_library", "Library"),
+        ("u", "open_queue", "Up Next"),
         ("r", "refresh", "Refresh"),
         ("q", "quit", "Quit"),
     ]
@@ -170,7 +204,7 @@ class LmTuiApp(App):
     INPUT_SENSITIVE_ACTIONS = {
         "play_pause", "next_track", "previous_track",
         "volume_up", "volume_down", "shuffle",
-        "add_to_playlist", "open_library", "refresh",
+        "add_to_playlist", "open_library", "open_queue", "refresh",
     }
 
     def __init__(self) -> None:
@@ -264,8 +298,6 @@ class LmTuiApp(App):
         asyncio.create_task(self._add_to_playlist(playlist_name))
 
     async def _add_to_playlist(self, playlist_name: str) -> None:
-        # Duplicate check: if the current track is already in the
-        # playlist, warn instead of adding a second copy.
         count = await self.controller.current_track_count_in(playlist_name)
         if count > 0:
             plural = "copy" if count == 1 else "copies"
@@ -287,7 +319,10 @@ class LmTuiApp(App):
         else:
             self.notify("Could not add track", severity="error", timeout=3)
 
-    # ------ Library browser action ------
+    # ------ Library & queue actions ------
 
     def action_open_library(self) -> None:
         self.push_screen(LibraryBrowserScreen(self.controller))
+
+    def action_open_queue(self) -> None:
+        self.push_screen(QueueScreen(self.controller))
