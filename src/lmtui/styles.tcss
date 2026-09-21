@@ -191,3 +191,10 @@ DataTable > .datatable--cursor {
 #library-search:focus {
     border: round #cba6f7;
 }
+
+/* Hide horizontal scrollbar on the tracks table — column widths are
+   handled internally and the scrollbar is visual noise. */
+
+#library-tracks {
+    scrollbar-size-horizontal: 0;
+}

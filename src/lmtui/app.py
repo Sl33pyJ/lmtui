@@ -18,9 +18,11 @@ from lmtui.applescript import (
 )
 from lmtui.library import (
     add_current_to_playlist,
+    current_track_count_in,
     get_playlist_tracks,
     list_playlists,
     play_playlist_track,
+    remove_playlist_track,
 )
 from lmtui.screens import AddToPlaylistScreen, LibraryBrowserScreen
 from lmtui.worker import MusicWorker
@@ -62,12 +64,18 @@ class MusicController:
     async def add_current_to_playlist(self, name: str) -> bool:
         return await asyncio.to_thread(add_current_to_playlist, name)
 
+    async def current_track_count_in(self, name: str) -> int:
+        return await asyncio.to_thread(current_track_count_in, name)
+
     # Slow calls — routed through the dedicated worker thread.
     async def get_playlist_tracks(self, name: str) -> list[dict]:
         return await self.worker.run(get_playlist_tracks, name)
 
     async def play_playlist_track(self, name: str, index: int) -> bool:
         return await self.worker.run(play_playlist_track, name, index)
+
+    async def remove_playlist_track(self, name: str, index: int) -> bool:
+        return await self.worker.run(remove_playlist_track, name, index)
 
 
 # ------ Album art ------
@@ -159,8 +167,6 @@ class LmTuiApp(App):
         ("q", "quit", "Quit"),
     ]
 
-    # Actions to suspend while a text input has focus. Otherwise typing
-    # "a" or "s" into a search box would fire the corresponding shortcut.
     INPUT_SENSITIVE_ACTIONS = {
         "play_pause", "next_track", "previous_track",
         "volume_up", "volume_down", "shuffle",
@@ -258,6 +264,18 @@ class LmTuiApp(App):
         asyncio.create_task(self._add_to_playlist(playlist_name))
 
     async def _add_to_playlist(self, playlist_name: str) -> None:
+        # Duplicate check: if the current track is already in the
+        # playlist, warn instead of adding a second copy.
+        count = await self.controller.current_track_count_in(playlist_name)
+        if count > 0:
+            plural = "copy" if count == 1 else "copies"
+            self.notify(
+                f"Already in \u201c{playlist_name}\u201d ({count} {plural})",
+                severity="warning",
+                timeout=4,
+            )
+            return
+
         self.notify(f"Adding to \u201c{playlist_name}\u201d\u2026", timeout=2)
         ok = await self.controller.add_current_to_playlist(playlist_name)
         if ok:

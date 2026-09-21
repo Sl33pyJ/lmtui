@@ -1,7 +1,6 @@
 # ------ Imports ------
 import asyncio
 
-from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
@@ -31,11 +30,7 @@ class PlaylistItem(ListItem):
 
 
 class SearchInput(Input):
-    """
-    Input that intercepts Escape to clear itself and return focus to
-    the tracks table, rather than letting Escape bubble up and close
-    the modal.
-    """
+    """Input that intercepts Escape to clear and return focus to the table."""
 
     BINDINGS = [
         ("escape", "cancel_search", "Cancel"),
@@ -43,7 +38,6 @@ class SearchInput(Input):
 
     def action_cancel_search(self) -> None:
         self.value = ""
-        # Find our sibling table and focus it.
         table = self.screen.query_one("#library-tracks", DataTable)
         table.focus()
 
@@ -94,15 +88,15 @@ class LibraryBrowserScreen(ModalScreen):
     """
     Full-screen library browser.
 
-    Playlists on the left, tracks on the right. Press `/` to filter the
-    current playlist's tracks by name, artist, or album. Enter on a
-    track starts playback and closes the browser.
+    Playlists on the left, tracks on the right. Press `/` to filter,
+    `d` twice to remove a track from the current playlist, Enter to play.
     """
 
     BINDINGS = [
         ("escape", "dismiss_modal", "Close"),
         ("q", "dismiss_modal", "Close"),
         ("slash", "focus_search", "Search"),
+        ("d", "delete_track", "Remove"),
     ]
 
     def __init__(self, controller) -> None:
@@ -111,6 +105,8 @@ class LibraryBrowserScreen(ModalScreen):
         self._current_playlist: str = ""
         self._all_tracks: list[dict] = []
         self._filter: str = ""
+        # Two-press delete: first press arms, second press removes.
+        self._pending_delete_row: int | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="library-layout"):
@@ -128,18 +124,17 @@ class LibraryBrowserScreen(ModalScreen):
     def on_mount(self) -> None:
         table = self.query_one("#library-tracks", DataTable)
         table.add_columns("#", "Title", "Artist", "Album")
-        # Search hidden until the user asks for it.
         self.query_one("#library-search").display = False
         asyncio.create_task(self._load_playlists())
 
-    # ------ Search binding guards ------
+    # ------ Action guards ------
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        # If the search input has focus, let it handle single-letter
-        # keys itself (including `q` which would otherwise close the
-        # modal).
-        if action == "dismiss_modal":
-            if isinstance(self.focused, SearchInput):
+        # While typing in the search box, `d` and `q` are just letters,
+        # not commands. Suppress them so the user can search for "denzel"
+        # or "queen" without triggering actions.
+        if isinstance(self.focused, SearchInput):
+            if action in ("dismiss_modal", "delete_track"):
                 return None
         return True
 
@@ -170,8 +165,8 @@ class LibraryBrowserScreen(ModalScreen):
         self._current_playlist = playlist_name
         self._all_tracks = tracks
         self._filter = ""
+        self._pending_delete_row = None
 
-        # Reset the search field now that we have a new track list.
         search = self.query_one("#library-search", SearchInput)
         search.value = ""
         search.display = False
@@ -242,6 +237,56 @@ class LibraryBrowserScreen(ModalScreen):
     async def _play_and_close(self, playlist_name: str, index: int) -> None:
         await self.controller.play_playlist_track(playlist_name, index)
         self.dismiss()
+
+    # ------ Delete action ------
+
+    def action_delete_track(self) -> None:
+        table = self.query_one("#library-tracks", DataTable)
+        row = table.cursor_row
+        if row < 0:
+            return
+
+        visible = self._visible_tracks()
+        if row >= len(visible):
+            return
+
+        if self._pending_delete_row == row:
+            # Second press — commit.
+            self._pending_delete_row = None
+            asyncio.create_task(self._do_delete(row))
+        else:
+            # First press — arm, wait for confirmation.
+            self._pending_delete_row = row
+            name = visible[row]["name"]
+            self.notify(
+                f"Press d again to remove \u201c{name}\u201d",
+                severity="warning",
+                timeout=3,
+            )
+            self.set_timer(3.0, self._disarm_delete)
+
+    def _disarm_delete(self) -> None:
+        self._pending_delete_row = None
+
+    async def _do_delete(self, row: int) -> None:
+        visible = self._visible_tracks()
+        if row >= len(visible):
+            return
+        track = visible[row]
+        playlist = self._current_playlist
+
+        self.notify(f"Removing \u201c{track['name']}\u201d\u2026", timeout=2)
+        ok = await self.controller.remove_playlist_track(playlist, track["index"])
+        if not ok:
+            self.notify("Could not remove track", severity="error", timeout=3)
+            return
+
+        self.notify(f"Removed from \u201c{playlist}\u201d", timeout=2)
+        # Reload — Music.app re-indexes the playlist after a delete, so
+        # our cached indices are stale.
+        await self._load_tracks(playlist)
+
+    # ------ Close ------
 
     def action_dismiss_modal(self) -> None:
         self.dismiss()

@@ -37,11 +37,8 @@ def list_playlists(timeout: float = 5.0) -> list[str]:
 
 
 # ------ Add current track to a playlist ------
-# Two-stage strategy ported from the user's `madd` zsh function:
-#   1. Try direct duplicate (works for owned/purchased tracks)
-#   2. On failure, add to library, poll for the entry, then duplicate
-#      the library instance into the playlist. Required for Apple
-#      Music subscription (URL) tracks.
+# Two-stage strategy: try direct duplicate (owned tracks); fall back to
+# library-then-duplicate (subscription tracks).
 
 _ADD_TO_PLAYLIST_SCRIPT = '''
 on run argv
@@ -52,7 +49,6 @@ on run argv
         set trackName to name of t
         set trackArtist to artist of t
 
-        -- Attempt 1: direct duplicate.
         try
             duplicate t to playlist plName
             try
@@ -61,8 +57,6 @@ on run argv
             return "OK"
         end try
 
-        -- Attempt 2: subscription track. Add to library, poll, then
-        -- duplicate the library instance.
         try
             duplicate t to source "Library"
         end try
@@ -103,9 +97,53 @@ def add_current_to_playlist(playlist_name: str, timeout: float = 20.0) -> bool:
     return result.returncode == 0 and result.stdout.strip() == "OK"
 
 
+# ------ Duplicate detection ------
+# Returns the number of times the currently-playing track appears in the
+# named playlist. Used to warn the user before adding a duplicate.
+
+_CURRENT_COUNT_SCRIPT = '''
+on run argv
+    set plName to item 1 of argv
+    tell application "Music"
+        if player state is stopped then return "0"
+        set t to current track
+        set trackName to name of t
+        set trackArtist to artist of t
+        try
+            set pl to user playlist plName
+            set matches to (every track of pl ¬
+                whose name is trackName and artist is trackArtist)
+            return (count of matches) as string
+        on error
+            return "0"
+        end try
+    end tell
+end run
+'''
+
+
+def current_track_count_in(playlist_name: str, timeout: float = 5.0) -> int:
+    """Count how many times the current track appears in a playlist."""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", _CURRENT_COUNT_SCRIPT, playlist_name],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return 0
+
+    if result.returncode != 0:
+        return 0
+
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return 0
+
+
 # ------ Playlist tracks ------
-# Emits one line per track, tab-separated. Leading index lets us say
-# `play track N of user playlist "X"` without re-fetching.
 
 _GET_PLAYLIST_TRACKS_SCRIPT = '''
 on run argv
@@ -125,11 +163,7 @@ end run
 
 
 def get_playlist_tracks(playlist_name: str, timeout: float = 30.0) -> list[dict]:
-    """
-    Return the tracks in a user playlist as a list of dicts with keys
-    `index`, `name`, `artist`, `album`. The index is 1-based and can be
-    passed to `play_playlist_track`.
-    """
+    """Return list of dicts with keys: index, name, artist, album."""
     try:
         result = subprocess.run(
             ["osascript", "-e", _GET_PLAYLIST_TRACKS_SCRIPT, playlist_name],
@@ -179,13 +213,38 @@ def play_playlist_track(playlist_name: str, index: int, timeout: float = 5.0) ->
     """Start playback of track N (1-based) inside the given playlist."""
     try:
         result = subprocess.run(
-            [
-                "osascript",
-                "-e",
-                _PLAY_PLAYLIST_TRACK_SCRIPT,
-                playlist_name,
-                str(index),
-            ],
+            ["osascript", "-e", _PLAY_PLAYLIST_TRACK_SCRIPT, playlist_name, str(index)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+
+    return result.returncode == 0 and result.stdout.strip() == "OK"
+
+
+# ------ Remove from playlist ------
+# Removes the playlist entry. The library copy is untouched, and the
+# track's loved status stays as-is.
+
+_REMOVE_PLAYLIST_TRACK_SCRIPT = '''
+on run argv
+    set plName to item 1 of argv
+    set trackIdx to (item 2 of argv) as integer
+    tell application "Music"
+        delete track trackIdx of user playlist plName
+    end tell
+    return "OK"
+end run
+'''
+
+
+def remove_playlist_track(playlist_name: str, index: int, timeout: float = 5.0) -> bool:
+    """Remove track N (1-based) from a user playlist."""
+    try:
+        result = subprocess.run(
+            ["osascript", "-e", _REMOVE_PLAYLIST_TRACK_SCRIPT, playlist_name, str(index)],
             capture_output=True,
             text=True,
             timeout=timeout,
