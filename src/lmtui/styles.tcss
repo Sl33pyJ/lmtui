@@ -1,0 +1,59 @@
+/* ------ Global screen ------ */
+
+Screen {
+    background: #1e1e2e;
+    color: #cdd6f4;
+}
+
+/* ------ Header / Footer ------ */
+
+Header {
+    background: #181825;
+    color: #cba6f7;
+}
+
+Footer {
+    background: #181825;
+    color: #a6adc8;
+}
+
+/* ------ Main container ------ */
+
+#main {
+    padding: 1 2;
+}
+
+/* ------ Now Playing panel ------ */
+
+#now-playing {
+    border: round #45475a;
+    background: #181825;
+    padding: 1 2;
+    width: 100%;
+    height: auto;
+}
+
+#np-title {
+    color: #cba6f7;
+    text-style: bold;
+    margin-bottom: 1;
+}
+
+#np-track {
+    color: #a6e3a1;
+    text-style: bold;
+}
+
+#np-artist {
+    color: #cdd6f4;
+}
+
+#np-album {
+    color: #6c7086;
+    margin-bottom: 1;
+}
+
+#np-progress {
+    width: 100%;
+    margin-top: 1;
+}
