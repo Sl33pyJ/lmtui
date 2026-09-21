@@ -105,7 +105,6 @@ class LibraryBrowserScreen(ModalScreen):
         self._current_playlist: str = ""
         self._all_tracks: list[dict] = []
         self._filter: str = ""
-        # Two-press delete: first press arms, second press removes.
         self._pending_delete_row: int | None = None
 
     def compose(self) -> ComposeResult:
@@ -127,18 +126,11 @@ class LibraryBrowserScreen(ModalScreen):
         self.query_one("#library-search").display = False
         asyncio.create_task(self._load_playlists())
 
-    # ------ Action guards ------
-
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        # While typing in the search box, `d` and `q` are just letters,
-        # not commands. Suppress them so the user can search for "denzel"
-        # or "queen" without triggering actions.
         if isinstance(self.focused, SearchInput):
             if action in ("dismiss_modal", "delete_track"):
                 return None
         return True
-
-    # ------ Playlists ------
 
     async def _load_playlists(self) -> None:
         names = await self.controller.list_playlists()
@@ -151,8 +143,6 @@ class LibraryBrowserScreen(ModalScreen):
         item = event.item
         if isinstance(item, PlaylistItem):
             asyncio.create_task(self._load_tracks(item.playlist_name))
-
-    # ------ Tracks ------
 
     async def _load_tracks(self, playlist_name: str) -> None:
         title = self.query_one("#library-tracks-title", Static)
@@ -211,8 +201,6 @@ class LibraryBrowserScreen(ModalScreen):
                 f"\u2014 {len(self._all_tracks)} tracks"
             )
 
-    # ------ Search wiring ------
-
     def action_focus_search(self) -> None:
         search = self.query_one("#library-search", SearchInput)
         search.display = True
@@ -221,8 +209,6 @@ class LibraryBrowserScreen(ModalScreen):
     def on_input_changed(self, event: Input.Changed) -> None:
         self._filter = event.value.strip().lower()
         self._refresh_table()
-
-    # ------ Row selection ------
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         row = event.cursor_row
@@ -235,10 +221,16 @@ class LibraryBrowserScreen(ModalScreen):
         )
 
     async def _play_and_close(self, playlist_name: str, index: int) -> None:
-        await self.controller.play_playlist_track(playlist_name, index)
+        total = len(self._all_tracks)
+        ok = await self.controller.jump_to_track(playlist_name, index, total)
+        if not ok:
+            self.notify(
+                "Track unavailable \u2014 Music.app refused to play it",
+                severity="error",
+                timeout=4,
+            )
+            return
         self.dismiss()
-
-    # ------ Delete action ------
 
     def action_delete_track(self) -> None:
         table = self.query_one("#library-tracks", DataTable)
@@ -251,11 +243,9 @@ class LibraryBrowserScreen(ModalScreen):
             return
 
         if self._pending_delete_row == row:
-            # Second press — commit.
             self._pending_delete_row = None
             asyncio.create_task(self._do_delete(row))
         else:
-            # First press — arm, wait for confirmation.
             self._pending_delete_row = row
             name = visible[row]["name"]
             self.notify(
@@ -282,11 +272,7 @@ class LibraryBrowserScreen(ModalScreen):
             return
 
         self.notify(f"Removed from \u201c{playlist}\u201d", timeout=2)
-        # Reload — Music.app re-indexes the playlist after a delete, so
-        # our cached indices are stale.
         await self._load_tracks(playlist)
-
-    # ------ Close ------
 
     def action_dismiss_modal(self) -> None:
         self.dismiss()
@@ -333,8 +319,6 @@ class QueueScreen(ModalScreen):
         subtitle.update("Loading\u2026")
         table.clear()
 
-        # Shuffle state is cheap to query — read it in parallel with the
-        # slower queue fetch.
         shuffled = await self.controller.shuffle_enabled()
 
         data = await self.controller.get_queue()
@@ -372,12 +356,17 @@ class QueueScreen(ModalScreen):
         asyncio.create_task(self._jump_to(track["index"]))
 
     async def _jump_to(self, index: int) -> None:
-        ok = await self.controller.play_playlist_track(self._playlist, index)
+        all_tracks = await self.controller.get_playlist_tracks(self._playlist)
+        total = len(all_tracks)
+
+        ok = await self.controller.jump_to_track(self._playlist, index, total)
         if not ok:
-            self.notify("Could not jump to track", severity="error", timeout=3)
+            self.notify(
+                "Track unavailable \u2014 Music.app refused to play it",
+                severity="error",
+                timeout=4,
+            )
             return
-        # Reload — the current track has changed, so "upcoming" is now
-        # different.
         await self._load_queue()
 
     def action_refresh_queue(self) -> None:

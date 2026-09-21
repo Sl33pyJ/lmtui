@@ -1,5 +1,6 @@
 # ------ Imports ------
 import asyncio
+import random
 import subprocess
 
 from textual.app import App, ComposeResult
@@ -53,31 +54,32 @@ def _read_shuffle() -> bool:
 # ------ Controller ------
 
 class MusicController:
-    """Async wrapper around the synchronous AppleScript layer."""
+    """
+    Async wrapper around the synchronous AppleScript layer.
+
+    Also owns lmtui's playback state: which playlist we're playing from
+    and which index of that playlist is current. This is separate from
+    whatever Music.app thinks, because Music.app's own track tracking
+    can't distinguish duplicate entries (same name+artist+album).
+    """
 
     def __init__(self) -> None:
         self.worker = MusicWorker()
 
-    # Fast calls — safe on the default asyncio thread pool.
+        # Playback state. None until the user starts a track from
+        # lmtui's library browser or queue view.
+        self._queue_playlist: str | None = None
+        self._queue_order: list[int] = []   # 1-based indices into the playlist
+        self._queue_pos: int = -1           # index into _queue_order
+        self._shuffle: bool = False
+
+    # ------ Fast operations (default thread pool) ------
+
     async def now_playing(self) -> Track | None:
         return await asyncio.to_thread(get_now_playing)
 
     async def play_pause(self) -> None:
         await asyncio.to_thread(play_pause)
-
-    async def next(self) -> None:
-        """Playlist-aware next; falls back to native if no context."""
-        ok = await asyncio.to_thread(smart_next)
-        if not ok:
-            await asyncio.to_thread(next_track)
-
-    async def previous(self) -> None:
-        ok = await asyncio.to_thread(smart_previous)
-        if not ok:
-            await asyncio.to_thread(previous_track)
-
-    async def toggle_shuffle(self) -> None:
-        await asyncio.to_thread(toggle_shuffle)
 
     async def volume_up(self) -> None:
         await asyncio.to_thread(volume_up)
@@ -97,18 +99,135 @@ class MusicController:
     async def shuffle_enabled(self) -> bool:
         return await asyncio.to_thread(_read_shuffle)
 
-    # Slow calls — routed through the dedicated worker thread.
+    # ------ Slow operations (worker thread) ------
+
     async def get_playlist_tracks(self, name: str) -> list[dict]:
         return await self.worker.run(get_playlist_tracks, name)
-
-    async def play_playlist_track(self, name: str, index: int) -> bool:
-        return await self.worker.run(play_playlist_track, name, index)
 
     async def remove_playlist_track(self, name: str, index: int) -> bool:
         return await self.worker.run(remove_playlist_track, name, index)
 
     async def get_queue(self) -> dict:
         return await self.worker.run(get_queue)
+
+    # ------ Playback state ------
+
+    async def jump_to_track(
+        self, playlist_name: str, index: int, total_tracks: int
+    ) -> bool:
+        """
+        Play a specific track and set up queue state so subsequent
+        next/previous calls are reliable.
+
+        `total_tracks` is needed so we can build the full order for
+        shuffle and advance past the end.
+        """
+        indices = list(range(1, total_tracks + 1))
+
+        if self._shuffle and total_tracks > 1:
+            rest = [i for i in indices if i != index]
+            random.shuffle(rest)
+            order = [index] + rest
+            pos = 0
+        else:
+            order = indices
+            pos = index - 1
+
+        self._queue_playlist = playlist_name
+        self._queue_order = order
+        self._queue_pos = pos
+
+        return await self.worker.run(play_playlist_track, playlist_name, index)
+
+    async def next(self) -> None:
+        """Advance within the lmtui queue; fall back to scanning."""
+        if self._can_step(forward=True):
+            self._queue_pos += 1
+            idx = self._queue_order[self._queue_pos]
+            await self.worker.run(
+                play_playlist_track, self._queue_playlist, idx
+            )
+            return
+
+        if self._shuffle and self._queue_playlist:
+            # Wrap: reshuffle the tail and restart.
+            await self._reshuffle_from_current()
+            if self._can_step(forward=True):
+                self._queue_pos += 1
+                idx = self._queue_order[self._queue_pos]
+                await self.worker.run(
+                    play_playlist_track, self._queue_playlist, idx
+                )
+                return
+
+        # No queue state or at the end: fall back.
+        ok = await asyncio.to_thread(smart_next)
+        if not ok:
+            await asyncio.to_thread(next_track)
+
+    async def previous(self) -> None:
+        if self._can_step(forward=False):
+            self._queue_pos -= 1
+            idx = self._queue_order[self._queue_pos]
+            await self.worker.run(
+                play_playlist_track, self._queue_playlist, idx
+            )
+            return
+
+        # At the top: restart current track, matching Music.app behavior.
+        if self._queue_playlist and 0 <= self._queue_pos:
+            idx = self._queue_order[self._queue_pos]
+            await self.worker.run(
+                play_playlist_track, self._queue_playlist, idx
+            )
+            return
+
+        ok = await asyncio.to_thread(smart_previous)
+        if not ok:
+            await asyncio.to_thread(previous_track)
+
+    async def toggle_shuffle(self) -> None:
+        """
+        Toggle both lmtui's internal shuffle AND Music.app's shuffle so
+        the UI reflects reality. Our shuffle regenerates the order of
+        the tracks after the current position.
+        """
+        await asyncio.to_thread(toggle_shuffle)
+        self._shuffle = not self._shuffle
+
+        if not self._queue_playlist or self._queue_pos < 0:
+            return
+
+        current = self._queue_order[self._queue_pos]
+        all_indices = list(range(1, len(self._queue_order) + 1))
+
+        if self._shuffle:
+            rest = [i for i in all_indices if i != current]
+            random.shuffle(rest)
+            self._queue_order = [current] + rest
+            self._queue_pos = 0
+        else:
+            self._queue_order = all_indices
+            self._queue_pos = current - 1
+
+    async def _reshuffle_from_current(self) -> None:
+        """After reaching the end of a shuffled order, reshuffle from 1."""
+        if not self._queue_playlist:
+            return
+        n = len(self._queue_order)
+        order = list(range(1, n + 1))
+        random.shuffle(order)
+        self._queue_order = order
+        self._queue_pos = 0
+
+    def _can_step(self, *, forward: bool) -> bool:
+        if not self._queue_playlist or not self._queue_order:
+            return False
+        if self._queue_pos < 0:
+            return False
+        if forward:
+            return self._queue_pos < len(self._queue_order) - 1
+        return self._queue_pos > 0
 
 
 # ------ Album art ------
