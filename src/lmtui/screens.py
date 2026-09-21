@@ -1,10 +1,18 @@
 # ------ Imports ------
 import asyncio
 
+from textual import events
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Label, ListItem, ListView, Static
+from textual.widgets import (
+    DataTable,
+    Input,
+    Label,
+    ListItem,
+    ListView,
+    Static,
+)
 
 from lmtui.applescript import Track
 
@@ -20,6 +28,24 @@ class PlaylistItem(ListItem):
 
     def compose(self) -> ComposeResult:
         yield Label(self.playlist_name)
+
+
+class SearchInput(Input):
+    """
+    Input that intercepts Escape to clear itself and return focus to
+    the tracks table, rather than letting Escape bubble up and close
+    the modal.
+    """
+
+    BINDINGS = [
+        ("escape", "cancel_search", "Cancel"),
+    ]
+
+    def action_cancel_search(self) -> None:
+        self.value = ""
+        # Find our sibling table and focus it.
+        table = self.screen.query_one("#library-tracks", DataTable)
+        table.focus()
 
 
 # ------ AddToPlaylist modal ------
@@ -66,21 +92,25 @@ class AddToPlaylistScreen(ModalScreen):
 
 class LibraryBrowserScreen(ModalScreen):
     """
-    Full-screen library browser. Playlists on the left, tracks on the
-    right. Enter on a playlist loads its tracks. Enter on a track starts
-    playback and closes the browser.
+    Full-screen library browser.
+
+    Playlists on the left, tracks on the right. Press `/` to filter the
+    current playlist's tracks by name, artist, or album. Enter on a
+    track starts playback and closes the browser.
     """
 
     BINDINGS = [
         ("escape", "dismiss_modal", "Close"),
         ("q", "dismiss_modal", "Close"),
+        ("slash", "focus_search", "Search"),
     ]
 
     def __init__(self, controller) -> None:
         super().__init__()
         self.controller = controller
         self._current_playlist: str = ""
-        self._current_tracks: list[dict] = []
+        self._all_tracks: list[dict] = []
+        self._filter: str = ""
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="library-layout"):
@@ -89,12 +119,31 @@ class LibraryBrowserScreen(ModalScreen):
                 yield ListView(id="library-playlists")
             with Vertical(id="library-main"):
                 yield Static("Select a playlist \u2192", id="library-tracks-title")
+                yield SearchInput(
+                    placeholder="Filter tracks\u2026  (Esc to clear)",
+                    id="library-search",
+                )
                 yield DataTable(id="library-tracks", cursor_type="row")
 
     def on_mount(self) -> None:
         table = self.query_one("#library-tracks", DataTable)
         table.add_columns("#", "Title", "Artist", "Album")
+        # Search hidden until the user asks for it.
+        self.query_one("#library-search").display = False
         asyncio.create_task(self._load_playlists())
+
+    # ------ Search binding guards ------
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        # If the search input has focus, let it handle single-letter
+        # keys itself (including `q` which would otherwise close the
+        # modal).
+        if action == "dismiss_modal":
+            if isinstance(self.focused, SearchInput):
+                return None
+        return True
+
+    # ------ Playlists ------
 
     async def _load_playlists(self) -> None:
         names = await self.controller.list_playlists()
@@ -108,6 +157,8 @@ class LibraryBrowserScreen(ModalScreen):
         if isinstance(item, PlaylistItem):
             asyncio.create_task(self._load_tracks(item.playlist_name))
 
+    # ------ Tracks ------
+
     async def _load_tracks(self, playlist_name: str) -> None:
         title = self.query_one("#library-tracks-title", Static)
         title.update(f"Loading \u201c{playlist_name}\u201d\u2026")
@@ -117,9 +168,34 @@ class LibraryBrowserScreen(ModalScreen):
 
         tracks = await self.controller.get_playlist_tracks(playlist_name)
         self._current_playlist = playlist_name
-        self._current_tracks = tracks
+        self._all_tracks = tracks
+        self._filter = ""
 
-        for t in tracks:
+        # Reset the search field now that we have a new track list.
+        search = self.query_one("#library-search", SearchInput)
+        search.value = ""
+        search.display = False
+
+        self._refresh_table()
+        table.focus()
+
+    def _visible_tracks(self) -> list[dict]:
+        if not self._filter:
+            return self._all_tracks
+        f = self._filter
+        return [
+            t for t in self._all_tracks
+            if f in t["name"].lower()
+            or f in t["artist"].lower()
+            or f in t["album"].lower()
+        ]
+
+    def _refresh_table(self) -> None:
+        table = self.query_one("#library-tracks", DataTable)
+        table.clear()
+
+        visible = self._visible_tracks()
+        for t in visible:
             table.add_row(
                 str(t["index"]),
                 t["name"],
@@ -127,15 +203,41 @@ class LibraryBrowserScreen(ModalScreen):
                 t["album"],
             )
 
-        title.update(f"\u201c{playlist_name}\u201d \u2014 {len(tracks)} tracks")
-        table.focus()
+        title = self.query_one("#library-tracks-title", Static)
+        if self._filter:
+            title.update(
+                f"\u201c{self._current_playlist}\u201d "
+                f"\u2014 {len(visible)}/{len(self._all_tracks)} "
+                f"(filter: {self._filter!r})"
+            )
+        else:
+            title.update(
+                f"\u201c{self._current_playlist}\u201d "
+                f"\u2014 {len(self._all_tracks)} tracks"
+            )
+
+    # ------ Search wiring ------
+
+    def action_focus_search(self) -> None:
+        search = self.query_one("#library-search", SearchInput)
+        search.display = True
+        search.focus()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self._filter = event.value.strip().lower()
+        self._refresh_table()
+
+    # ------ Row selection ------
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         row = event.cursor_row
-        if row < 0 or row >= len(self._current_tracks):
+        visible = self._visible_tracks()
+        if row < 0 or row >= len(visible):
             return
-        track = self._current_tracks[row]
-        asyncio.create_task(self._play_and_close(self._current_playlist, track["index"]))
+        track = visible[row]
+        asyncio.create_task(
+            self._play_and_close(self._current_playlist, track["index"])
+        )
 
     async def _play_and_close(self, playlist_name: str, index: int) -> None:
         await self.controller.play_playlist_track(playlist_name, index)

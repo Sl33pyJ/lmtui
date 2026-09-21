@@ -4,7 +4,7 @@ import asyncio
 from textual.app import App, ComposeResult
 from textual.containers import Container, Horizontal
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Label, ProgressBar, Static
+from textual.widgets import Footer, Header, Input, Label, ProgressBar, Static
 
 from lmtui.applescript import (
     Track,
@@ -159,9 +159,23 @@ class LmTuiApp(App):
         ("q", "quit", "Quit"),
     ]
 
+    # Actions to suspend while a text input has focus. Otherwise typing
+    # "a" or "s" into a search box would fire the corresponding shortcut.
+    INPUT_SENSITIVE_ACTIONS = {
+        "play_pause", "next_track", "previous_track",
+        "volume_up", "volume_down", "shuffle",
+        "add_to_playlist", "open_library", "refresh",
+    }
+
     def __init__(self) -> None:
         super().__init__()
         self.controller = MusicController()
+
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        if action in self.INPUT_SENSITIVE_ACTIONS:
+            if isinstance(self.focused, Input):
+                return None
+        return True
 
     def compose(self) -> ComposeResult:
         yield Header()

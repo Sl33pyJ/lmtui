@@ -177,3 +177,17 @@ DataTable > .datatable--cursor {
     background: #45475a;
     color: #cdd6f4;
 }
+
+/* ------ Library search input ------ */
+
+#library-search {
+    background: #1e1e2e;
+    border: round #45475a;
+    color: #cdd6f4;
+    margin-bottom: 1;
+    height: 3;
+}
+
+#library-search:focus {
+    border: round #cba6f7;
+}
