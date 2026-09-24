@@ -99,10 +99,11 @@ class LibraryBrowserScreen(ModalScreen):
         ("d", "delete_track", "Remove"),
     ]
 
-    def __init__(self, controller) -> None:
+    def __init__(self, controller, initial_playlist: str | None = None) -> None:
         super().__init__()
         self.controller = controller
         self._current_playlist: str = ""
+        self. initial_playlist = initial_playlist
         self._all_tracks: list[dict] = []
         self._filter: str = ""
         self._pending_delete_row: int | None = None
@@ -137,7 +138,13 @@ class LibraryBrowserScreen(ModalScreen):
         lv = self.query_one("#library-playlists", ListView)
         for name in names:
             lv.append(PlaylistItem(name))
-        lv.focus()
+
+        # If caller specified an initial playlist, load it right away
+        # and focus the track table instead of the playlist list.
+        if self._initial_playlist and self._initial_playlist in names:
+            await self._load_tracks(self._initial_playlist)
+        else:
+            lv.focus()
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         item = event.item
