@@ -1,15 +1,17 @@
 # ------ Imports ------
-import time
 import asyncio
+import math
 import random
 import subprocess
+import textwrap
+import time
 
 from rich.markup import escape
 
 from textual.app import App, ComposeResult
-from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical
 from textual.reactive import reactive
-from textual.widgets import Footer, Header, Input, Label, Static
+from textual.widgets import Footer, Header, Input, Static
 
 from lmtui.applescript import (
     Track,
@@ -41,6 +43,7 @@ from lmtui.screens import (
 )
 from lmtui.worker import MusicWorker
 from lmtui.visualizer import CavaVisualizer
+
 
 # ------ Helpers ------
 
@@ -226,22 +229,26 @@ class MusicController:
         return self._queue_pos > 0
 
 
-# ------ Queue panel (left) ------
+# ------ Queue panel ------
 
 class QueuePanel(Vertical):
-    """Queue list: current track on top, then upcoming tracks."""
+    """
+    Queue list: current track on top, then upcoming tracks.
+
+    Auto-heights to its content. When there are no upcoming tracks,
+    the panel collapses to just the now-playing block.
+    """
 
     current_track: reactive[Track | None] = reactive(None)
     _last_key: str = ""
+    _cached_data: dict | None = None
 
     def __init__(self, controller: MusicController, **kwargs) -> None:
         super().__init__(**kwargs)
         self.controller = controller
 
     def compose(self) -> ComposeResult:
-        yield Label("♪ Queue", id="queue-title")
-        with VerticalScroll(id="queue-scroll"):
-            yield Static("", id="queue-content")
+        yield Static("", id="queue-content")
 
     def watch_current_track(self, track: Track | None) -> None:
         key = f"{track.name}|{track.artist}" if track else ""
@@ -255,6 +262,14 @@ class QueuePanel(Vertical):
         content.update("[#6c7086]loading…[/]")
 
         data = await self.controller.get_queue()
+        self._cached_data = data
+        self._render_from_cache()
+
+    def _render_from_cache(self) -> None:
+        if self._cached_data is None:
+            return
+
+        data = self._cached_data
         tracks = data["tracks"]
         playlist = data["playlist"] or ""
         current = self.current_track
@@ -262,43 +277,52 @@ class QueuePanel(Vertical):
         lines: list[str] = []
 
         if playlist:
-            lines.append(f"[#6c7086]from[/] [#cba6f7]{escape(playlist)}[/]\n")
+            lines.append(f"[#6c7086]from[/] [#cba6f7]{escape(playlist)}[/]")
 
         if current is not None:
+            if lines:
+                lines.append("")
             lines.append("[#6c7086]▶ now playing[/]")
-            lines.append(
-                f"  [#cba6f7 bold]{escape(current.name)}[/]\n"
-                f"  [#cdd6f4]{escape(current.artist)}[/]\n"
-            )
+            lines.append(f"  [#f5c2e7 bold]{escape(current.name)}[/]")
+            lines.append(f"  [#cdd6f4]{escape(current.artist)}[/]")
+        else:
+            lines.append("[#6c7086]— nothing playing —[/]")
 
         if tracks:
+            lines.append("")
             lines.append("[#6c7086]up next[/]")
             for i, t in enumerate(tracks, start=1):
                 name = escape(t["name"])
                 artist = escape(t["artist"])
-                lines.append(
-                    f"  [#6c7086]{i:>2}.[/]  [#a6e3a1]{name}[/]\n"
-                    f"        [#6c7086]{artist}[/]"
-                )
-        else:
-            lines.append("[#6c7086](queue empty)[/]")
+                lines.append(f"  [#6c7086]{i:>2}.[/]  [#a6e3a1]{name}[/]")
+                lines.append(f"        [#6c7086]{artist}[/]")
 
+        content = self.query_one("#queue-content", Static)
         content.update("\n".join(lines))
 
 
-# ------ Visualizer panel (right top) ------
+# ------ Visualizer panel ------
+
 class VisualizerPanel(Vertical):
-    """Audio visualizer rendering cava output as colored Unicode bars."""
+    """
+    Audio visualizer. Reads the box dimensions on every frame so the
+    bars always exactly fill the panel — no matter the terminal size.
+
+    Auto-scales to cava's actual output range so quiet music is
+    visible and loud music uses 90% of the height (leaving breathing
+    room for peaks).
+    """
 
     FPS = 30
+    PEAK_HEIGHT_FRACTION = 0.9
 
     def __init__(self, **kwargs) -> None:
         super().__init__(**kwargs)
         self._cava = CavaVisualizer()
         self._running = False
+        self._scale_max: float = 30.0
 
     def compose(self) -> ComposeResult:
-        yield Label("♪ Visualizer", id="viz-title")
         yield Static("", id="viz-content")
 
     def on_mount(self) -> None:
@@ -324,7 +348,9 @@ class VisualizerPanel(Vertical):
         content.update(self._render_frame(values))
 
     def _render_frame(self, values: list[int]) -> str:
-        # Panel inner dimensions
+        if not values:
+            return ""
+
         try:
             size = self.query_one("#viz-content", Static).content_size
         except Exception:
@@ -333,56 +359,64 @@ class VisualizerPanel(Vertical):
         if width < 4 or height < 2:
             return ""
 
-        # Downsample cava bars to fit the panel width
-        if len(values) > width:
-            step = len(values) / width
-            sampled = [values[min(int(i * step), len(values) - 1)]
-                       for i in range(width)]
-        else:
-            sampled = values + [0] * (width - len(values))
+        # Resample cava output to exactly `width` columns.
+        step = len(values) / width
+        sampled = [
+            values[min(int(i * step), len(values) - 1)]
+            for i in range(width)
+        ]
 
-        # Row-based color gradient: green bottom → yellow → peach → red top
+        # Auto-scale: track a rolling max and decay slowly so a loud
+        # spike doesn't shrink everything afterwards.
+        frame_max = float(max(sampled)) if sampled else 1.0
+        self._scale_max = max(self._scale_max * 0.98, frame_max, 1.0)
+
+        scaled = [
+            math.sqrt(min(v / self._scale_max, 1.0))
+            for v in sampled
+        ]
+
         def color_for(row: int) -> str:
             if height <= 1:
                 return "#a6e3a1"
-            t = 1.0 - (row / (height - 1))  # 0 = bottom, 1 = top
+            t = 1.0 - (row / (height - 1))
             if t < 0.25: return "#a6e3a1"
             if t < 0.50: return "#f9e2af"
             if t < 0.75: return "#fab387"
             return "#f38ba8"
 
+        peak_h = height * self.PEAK_HEIGHT_FRACTION
         lines: list[str] = []
         for row in range(height):
-            dist_from_bottom = height - row  # 1 for bottom row
+            dist_from_bottom = height - row
             color = color_for(row)
             cells: list[str] = []
-            for v in sampled:
-                bar_h = (v / 100.0) * height
+            for norm in scaled:
+                bar_h = norm * peak_h
                 if bar_h >= dist_from_bottom:
-                    cells.append(f"[{color}]\u2588[/]")       # █
+                    cells.append(f"[{color}]\u2588[/]")
                 elif bar_h >= dist_from_bottom - 0.5:
-                    cells.append(f"[{color}]\u2584[/]")       # ▄
+                    cells.append(f"[{color}]\u2584[/]")
                 elif bar_h >= dist_from_bottom - 0.75:
-                    cells.append(f"[{color}]\u2581[/]")       # ▁
+                    cells.append(f"[{color}]\u2581[/]")
                 else:
                     cells.append(" ")
             lines.append("".join(cells))
         return "\n".join(lines)
 
 
-# ------ Lyrics panel (right bottom) ------
+# ------ Lyrics panel ------
+
 class LyricsPanel(Vertical):
     """
-    Displays lyrics for the current track.
+    Displays lyrics for the current track with a track header.
 
     Synced lyrics: highlights the current line based on playback
-    position. Position is interpolated from the last AppleScript read
-    + elapsed monotonic time, so we don't hammer AppleScript.
-
-    Unsynced lyrics: shown as plain text, no highlighting.
+    position. Re-wraps to the panel width and re-windows to the panel
+    height on every tick, so it always fits the box.
     """
 
-    FPS = 4  # position update rate for synced highlighting
+    FPS = 4
 
     def __init__(self, controller, **kwargs) -> None:
         super().__init__(**kwargs)
@@ -393,29 +427,36 @@ class LyricsPanel(Vertical):
         self._base_pos: float = 0.0
         self._base_time: float = 0.0
         self._last_highlight: int = -1
+        self._last_size: tuple[int, int] = (0, 0)
         self._fetching: bool = False
+        self._track_label: str = ""
 
     def compose(self) -> ComposeResult:
-        yield Label("♪ Lyrics", id="lyr-title")
+        yield Static("♪ Lyrics", id="lyr-header")
         yield Static("", id="lyr-content")
 
     def on_mount(self) -> None:
         self.set_interval(1.0 / self.FPS, self._tick)
 
-    # Called by the app when the current track changes.
     def update_track(self, track: Track | None) -> None:
+        header = self.query_one("#lyr-header", Static)
+
         if track is None:
             if self._track_key:
                 self._track_key = ""
                 self._lyrics = None
+                self._track_label = ""
+                header.update("♪ Lyrics")
                 self.query_one("#lyr-content", Static).update(
                     "[#6c7086]— nothing playing —[/]"
                 )
             return
 
         key = f"{track.name}|{track.artist}"
+        self._track_label = f"♪  {track.name}  —  {track.artist}"
+        header.update(f"[#cba6f7]{escape(self._track_label)}[/]")
+
         if key == self._track_key:
-            # Same track — just refresh the position base.
             self._base_pos = float(track.position)
             self._base_time = time.monotonic()
             return
@@ -456,25 +497,29 @@ class LyricsPanel(Vertical):
         self._render_static(result)
 
     def _render_static(self, lyrics: Lyrics) -> None:
-        """Initial render — for unsynced or as a placeholder."""
         content = self.query_one("#lyr-content", Static)
         if lyrics.synced:
             content.update(self._render_synced(lyrics, 0))
         else:
-            text = "\n".join(
-                escape(line.text) for line in lyrics.lines
-            )
+            text = "\n".join(escape(line.text) for line in lyrics.lines)
             content.update(f"[#cdd6f4]{text}[/]")
 
     def _tick(self) -> None:
         if self._lyrics is None or not self._lyrics.synced:
             return
 
-        # Interpolated position: base + elapsed since the last read.
         pos = self._base_pos + (time.monotonic() - self._base_time)
         idx = self._current_line_index(self._lyrics.lines, pos)
-        if idx != self._last_highlight:
+
+        try:
+            size = self.query_one("#lyr-content", Static).content_size
+            current_size = (size.width, size.height)
+        except Exception:
+            current_size = (0, 0)
+
+        if idx != self._last_highlight or current_size != self._last_size:
             self._last_highlight = idx
+            self._last_size = current_size
             self.query_one("#lyr-content", Static).update(
                 self._render_synced(self._lyrics, idx)
             )
@@ -490,49 +535,56 @@ class LyricsPanel(Vertical):
         return idx
 
     def _render_synced(self, lyrics: Lyrics, current_idx: int) -> str:
-        """Render synced lyrics with current line highlighted and windowed
-        around the current position so long tracks don't scroll forever."""
         try:
-            size = self.query_one("#lyr-content", Static).size
+            size = self.query_one("#lyr-content", Static).content_size
+            width = max(size.width, 20)
+            height = max(size.height, 6)
         except Exception:
-            size = None
+            width, height = 60, 20
 
-        lines = lyrics.lines
-        total = len(lines)
+        wrapped: list[tuple[int, str]] = []
+        for i, line in enumerate(lyrics.lines):
+            chunks = textwrap.wrap(
+                line.text, width=width - 2, break_long_words=False
+            ) or [""]
+            for chunk in chunks:
+                wrapped.append((i, chunk))
 
-        # Show a window of ~20 lines centred on the current one
-        window_size = 20
-        if size and size.height > 0:
-            window_size = max(size.height, 6)
+        if not wrapped:
+            return ""
 
-        half = window_size // 2
-        start = max(0, current_idx - half)
-        end = min(total, start + window_size)
-        # If we clipped the tail, shift the window back so we always
-        # fill it when the lyrics are long enough.
-        if end - start < window_size and start > 0:
-            start = max(0, end - window_size)
+        current_visual = 0
+        for vi, (orig_i, _) in enumerate(wrapped):
+            if orig_i <= current_idx:
+                current_visual = vi
+            else:
+                break
+
+        window = height
+        half = window // 2
+        start = max(0, current_visual - half)
+        end = min(len(wrapped), start + window)
+        if end - start < window and start > 0:
+            start = max(0, end - window)
 
         out: list[str] = []
-        for i in range(start, end):
-            text = escape(lines[i].text)
-            if i == current_idx:
-                out.append(f"[#cba6f7 bold]{text}[/]")
-            elif i < current_idx:
-                out.append(f"[#6c7086]{text}[/]")
+        for vi in range(start, end):
+            orig_i, text = wrapped[vi]
+            text_esc = escape(text)
+            if orig_i == current_idx:
+                out.append(f"[#cba6f7 bold]{text_esc}[/]")
+            elif orig_i < current_idx:
+                out.append(f"[#6c7086]{text_esc}[/]")
             else:
-                out.append(f"[#cdd6f4]{text}[/]")
+                out.append(f"[#cdd6f4]{text_esc}[/]")
 
         return "\n".join(out)
 
 
-# ------ Small album art (for the bar) ------
+# ------ Small album art ------
 
 class SmallAlbumArt(Static):
-    """
-    Fixed-size album art for the now-playing bar. 8 cells wide renders
-    as 8 pixels square (4 lines tall) via half-blocks.
-    """
+    """Fixed-size album art for the now-playing bar."""
 
     track_key: reactive[str] = reactive("")
     WIDTH_CELLS = 8
@@ -561,7 +613,7 @@ class SmallAlbumArt(Static):
         self.query_one("#np-art-content", Static).update(rendered)
 
 
-# ------ Now playing bar (bottom) ------
+# ------ Now playing bar ------
 
 class NowPlayingBar(Container):
     """Full-width bottom strip: small art + track info + progress + state."""
@@ -672,9 +724,10 @@ class LmTuiApp(App):
         yield Header()
         with Container(id="main"):
             with Horizontal(id="body-row"):
-                yield QueuePanel(self.controller, id="queue-panel")
-                with Vertical(id="right-column"):
+                with Vertical(id="left-panel"):
+                    yield QueuePanel(self.controller, id="queue-panel")
                     yield VisualizerPanel(id="visualizer-panel")
+                with Vertical(id="right-column"):
                     yield LyricsPanel(self.controller, id="lyrics-panel")
             yield NowPlayingBar(id="now-playing-bar")
         yield Footer()
@@ -694,6 +747,7 @@ class LmTuiApp(App):
 
         queue = self.query_one(QueuePanel)
         queue.current_track = track
+
         lyrics = self.query_one(LyricsPanel)
         lyrics.update_track(track)
 

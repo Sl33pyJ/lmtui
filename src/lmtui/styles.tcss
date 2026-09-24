@@ -1,11 +1,10 @@
 /* ------ Catppuccin Mocha reference ------
    base #1e1e2e  mantle #181825  crust #11111b
-   surface0 #313244  surface1 #45475a  surface2 #585b70
+   surface0 #313244  surface1 #45475a
    overlay0 #6c7086  text #cdd6f4
-   mauve #cba6f7  green #a6e3a1  blue #89b4fa  lavender #b4befe
+   mauve #cba6f7  pink #f5c2e7  peach #fab387
+   green #a6e3a1  lavender #b4befe
    ------------------------------------------------- */
-
-/* ------ Screen / Header / Footer ------ */
 
 Screen {
     background: #1e1e2e;
@@ -33,16 +32,22 @@ Footer {
     height: 1fr;
 }
 
-/* ------ Left: queue panel (border only here) ------ */
+/* ------ Left column: queue (top) + visualizer (bottom) ------ */
+
+#left-panel {
+    width: 42%;
+    min-width: 30;
+    height: 100%;
+    margin-right: 1;
+    layout: vertical;
+}
 
 #queue-panel {
-    width: 42%;
-    min-width: 26;
-    height: 100%;
+    width: 100%;
+    height: 1fr;
     background: #181825;
     border: round #45475a;
     padding: 0 1;
-    margin-right: 1;
 }
 
 #queue-title {
@@ -54,7 +59,7 @@ Footer {
 
 #queue-scroll {
     height: 1fr;
-    scrollbar-size-vertical: 1;
+    scrollbar-size-vertical: 0;
 }
 
 #queue-content {
@@ -62,29 +67,14 @@ Footer {
     padding: 0 0 1 0;
 }
 
-/* ------ Right column (no borders) ------ */
-
-#right-column {
-    width: 1fr;
-    height: 100%;
-}
-
-/* Visualizer (top) */
-
 #visualizer-panel {
     width: 100%;
-    height: 3fr;
+    height: 8;
     background: #181825;
+    border: round #45475a;
     padding: 0 1;
-    margin-bottom: 1;
+    margin-top: 1;
     overflow: hidden;
-}
-
-#viz-title {
-    color: #cba6f7;
-    text-style: bold;
-    height: 2;
-    padding: 1 0 0 0;
 }
 
 #viz-content {
@@ -93,20 +83,20 @@ Footer {
     color: #6c7086;
 }
 
-/* Lyrics (bottom) */
+/* ------ Right column: lyrics ------ */
+
+#right-column {
+    width: 1fr;
+    height: 100%;
+}
 
 #lyrics-panel {
     width: 100%;
-    height: 2fr;
+    height: 100%;
     background: #181825;
-    padding: 0 1;
-}
-
-#lyr-title {
-    color: #cba6f7;
-    text-style: bold;
-    height: 2;
-    padding: 1 0 0 0;
+    border: round #45475a;
+    padding: 0 2;
+    overflow: hidden;
 }
 
 #lyr-content {
@@ -114,9 +104,6 @@ Footer {
     height: 1fr;
     color: #cdd6f4;
 }
-
-
-
 
 /* ------ Now playing bar ------ */
 
@@ -197,12 +184,13 @@ AddToPlaylistScreen {
     padding: 0 1;
 }
 
-PlaylistItem {
+AddToPlaylistScreen PlaylistItem {
     padding: 0 1;
 }
 
-PlaylistItem.--highlight {
-    background: #45475a;
+AddToPlaylistScreen PlaylistItem.--highlight {
+    background: #fab387;
+    color: #1e1e2e;
 }
 
 #dialog-hint {
@@ -266,8 +254,8 @@ DataTable > .datatable--header {
 }
 
 DataTable > .datatable--cursor {
-    background: #45475a;
-    color: #cdd6f4;
+    background: #fab387;
+    color: #1e1e2e;
 }
 
 #library-search {
@@ -279,7 +267,7 @@ DataTable > .datatable--cursor {
     padding: 0 1;
 }
 
-/* ------ Queue modal (still available via `u`) ------ */
+/* ------ Queue modal (u key) ------ */
 
 QueueScreen {
     background: #1e1e2e;
@@ -313,6 +301,6 @@ QueueScreen DataTable > .datatable--header {
 }
 
 QueueScreen DataTable > .datatable--cursor {
-    background: #45475a;
-    color: #cdd6f4;
+    background: #fab387;
+    color: #1e1e2e;
 }
