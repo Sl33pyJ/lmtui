@@ -1,4 +1,5 @@
 # ------ Imports ------
+import time
 import asyncio
 import random
 import subprocess
@@ -21,6 +22,7 @@ from lmtui.applescript import (
     volume_down,
     volume_up,
 )
+from lmtui.lyrics import Lyrics, LyricLine, fetch_lyrics
 from lmtui.library import (
     add_current_to_playlist,
     current_track_count_in,
@@ -369,17 +371,159 @@ class VisualizerPanel(Vertical):
 
 
 # ------ Lyrics panel (right bottom) ------
-
 class LyricsPanel(Vertical):
-    """Placeholder for LRCLIB-fetched lyrics."""
+    """
+    Displays lyrics for the current track.
+
+    Synced lyrics: highlights the current line based on playback
+    position. Position is interpolated from the last AppleScript read
+    + elapsed monotonic time, so we don't hammer AppleScript.
+
+    Unsynced lyrics: shown as plain text, no highlighting.
+    """
+
+    FPS = 4  # position update rate for synced highlighting
+
+    def __init__(self, controller, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.controller = controller
+
+        self._lyrics: Lyrics | None = None
+        self._track_key: str = ""
+        self._base_pos: float = 0.0
+        self._base_time: float = 0.0
+        self._last_highlight: int = -1
+        self._fetching: bool = False
 
     def compose(self) -> ComposeResult:
         yield Label("♪ Lyrics", id="lyr-title")
-        yield Static(
-            "[#6c7086]LRCLIB integration coming soon\n\n"
-            "synced lyrics will highlight the current line[/]",
-            id="lyr-content",
+        yield Static("", id="lyr-content")
+
+    def on_mount(self) -> None:
+        self.set_interval(1.0 / self.FPS, self._tick)
+
+    # Called by the app when the current track changes.
+    def update_track(self, track: Track | None) -> None:
+        if track is None:
+            if self._track_key:
+                self._track_key = ""
+                self._lyrics = None
+                self.query_one("#lyr-content", Static).update(
+                    "[#6c7086]— nothing playing —[/]"
+                )
+            return
+
+        key = f"{track.name}|{track.artist}"
+        if key == self._track_key:
+            # Same track — just refresh the position base.
+            self._base_pos = float(track.position)
+            self._base_time = time.monotonic()
+            return
+
+        self._track_key = key
+        self._base_pos = float(track.position)
+        self._base_time = time.monotonic()
+        self._lyrics = None
+        self._last_highlight = -1
+        self.query_one("#lyr-content", Static).update(
+            "[#6c7086]loading…[/]"
         )
+
+        if not self._fetching:
+            asyncio.create_task(self._load(track))
+
+    async def _load(self, track: Track) -> None:
+        self._fetching = True
+        try:
+            result = await asyncio.to_thread(
+                fetch_lyrics,
+                track.name,
+                track.artist,
+                track.album,
+                track.duration,
+            )
+        finally:
+            self._fetching = False
+
+        if result is None:
+            self.query_one("#lyr-content", Static).update(
+                "[#6c7086](no lyrics found)[/]"
+            )
+            return
+
+        self._lyrics = result
+        self._last_highlight = -1
+        self._render_static(result)
+
+    def _render_static(self, lyrics: Lyrics) -> None:
+        """Initial render — for unsynced or as a placeholder."""
+        content = self.query_one("#lyr-content", Static)
+        if lyrics.synced:
+            content.update(self._render_synced(lyrics, 0))
+        else:
+            text = "\n".join(
+                escape(line.text) for line in lyrics.lines
+            )
+            content.update(f"[#cdd6f4]{text}[/]")
+
+    def _tick(self) -> None:
+        if self._lyrics is None or not self._lyrics.synced:
+            return
+
+        # Interpolated position: base + elapsed since the last read.
+        pos = self._base_pos + (time.monotonic() - self._base_time)
+        idx = self._current_line_index(self._lyrics.lines, pos)
+        if idx != self._last_highlight:
+            self._last_highlight = idx
+            self.query_one("#lyr-content", Static).update(
+                self._render_synced(self._lyrics, idx)
+            )
+
+    @staticmethod
+    def _current_line_index(lines: list[LyricLine], pos: float) -> int:
+        idx = 0
+        for i, line in enumerate(lines):
+            if line.time <= pos:
+                idx = i
+            else:
+                break
+        return idx
+
+    def _render_synced(self, lyrics: Lyrics, current_idx: int) -> str:
+        """Render synced lyrics with current line highlighted and windowed
+        around the current position so long tracks don't scroll forever."""
+        try:
+            size = self.query_one("#lyr-content", Static).size
+        except Exception:
+            size = None
+
+        lines = lyrics.lines
+        total = len(lines)
+
+        # Show a window of ~20 lines centred on the current one
+        window_size = 20
+        if size and size.height > 0:
+            window_size = max(size.height, 6)
+
+        half = window_size // 2
+        start = max(0, current_idx - half)
+        end = min(total, start + window_size)
+        # If we clipped the tail, shift the window back so we always
+        # fill it when the lyrics are long enough.
+        if end - start < window_size and start > 0:
+            start = max(0, end - window_size)
+
+        out: list[str] = []
+        for i in range(start, end):
+            text = escape(lines[i].text)
+            if i == current_idx:
+                out.append(f"[#cba6f7 bold]{text}[/]")
+            elif i < current_idx:
+                out.append(f"[#6c7086]{text}[/]")
+            else:
+                out.append(f"[#cdd6f4]{text}[/]")
+
+        return "\n".join(out)
 
 
 # ------ Small album art (for the bar) ------
@@ -531,7 +675,7 @@ class LmTuiApp(App):
                 yield QueuePanel(self.controller, id="queue-panel")
                 with Vertical(id="right-column"):
                     yield VisualizerPanel(id="visualizer-panel")
-                    yield LyricsPanel(id="lyrics-panel")
+                    yield LyricsPanel(self.controller, id="lyrics-panel")
             yield NowPlayingBar(id="now-playing-bar")
         yield Footer()
 
@@ -550,6 +694,8 @@ class LmTuiApp(App):
 
         queue = self.query_one(QueuePanel)
         queue.current_track = track
+        lyrics = self.query_one(LyricsPanel)
+        lyrics.update_track(track)
 
     # ------ Control actions ------
 

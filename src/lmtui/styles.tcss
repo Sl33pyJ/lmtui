@@ -110,9 +110,13 @@ Footer {
 }
 
 #lyr-content {
-    color: #6c7086;
-    padding: 0 0 1 0;
+    width: 100%;
+    height: 1fr;
+    color: #cdd6f4;
 }
+
+
+
 
 /* ------ Now playing bar ------ */
 
