@@ -45,6 +45,13 @@ from lmtui.worker import MusicWorker
 from lmtui.visualizer import CavaVisualizer
 
 
+# ------ Layout thresholds ------
+
+COMPACT_WIDTH = 100
+COMPACT_HEIGHT = 32
+MINIMAL_HEIGHT = 22
+
+
 # ------ Helpers ------
 
 def _fmt_time(seconds: int) -> str:
@@ -235,8 +242,8 @@ class QueuePanel(Vertical):
     """
     Queue list: current track on top, then upcoming tracks.
 
-    Auto-heights to its content. When there are no upcoming tracks,
-    the panel collapses to just the now-playing block.
+    Auto-heights to content. In minimal mode (very short terminal)
+    it collapses further.
     """
 
     current_track: reactive[Track | None] = reactive(None)
@@ -306,11 +313,8 @@ class QueuePanel(Vertical):
 class VisualizerPanel(Vertical):
     """
     Audio visualizer. Reads the box dimensions on every frame so the
-    bars always exactly fill the panel — no matter the terminal size.
-
-    Auto-scales to cava's actual output range so quiet music is
-    visible and loud music uses 90% of the height (leaving breathing
-    room for peaks).
+    bars always exactly fill the panel. Forces a redraw on resize so
+    the bars don't render at a stale size.
     """
 
     FPS = 30
@@ -321,6 +325,7 @@ class VisualizerPanel(Vertical):
         self._cava = CavaVisualizer()
         self._running = False
         self._scale_max: float = 30.0
+        self._last_values: list[int] = []
 
     def compose(self) -> ComposeResult:
         yield Static("", id="viz-content")
@@ -336,6 +341,14 @@ class VisualizerPanel(Vertical):
                 "[#cba6f7]brew install cava[/]"
             )
 
+    def on_resize(self, event) -> None:
+        # Force a redraw with the last known values so the bars
+        # resize instantly with the window instead of waiting for
+        # the next cava frame.
+        if self._last_values:
+            content = self.query_one("#viz-content", Static)
+            content.update(self._render_frame(self._last_values))
+
     def on_unmount(self) -> None:
         if self._running:
             self._cava.stop()
@@ -344,6 +357,7 @@ class VisualizerPanel(Vertical):
         values = self._cava.get_frame()
         if not values:
             return
+        self._last_values = values
         content = self.query_one("#viz-content", Static)
         content.update(self._render_frame(values))
 
@@ -366,8 +380,7 @@ class VisualizerPanel(Vertical):
             for i in range(width)
         ]
 
-        # Auto-scale: track a rolling max and decay slowly so a loud
-        # spike doesn't shrink everything afterwards.
+        # Auto-scale: rolling max with slow decay.
         frame_max = float(max(sampled)) if sampled else 1.0
         self._scale_max = max(self._scale_max * 0.98, frame_max, 1.0)
 
@@ -410,10 +423,7 @@ class VisualizerPanel(Vertical):
 class LyricsPanel(Vertical):
     """
     Displays lyrics for the current track with a track header.
-
-    Synced lyrics: highlights the current line based on playback
-    position. Re-wraps to the panel width and re-windows to the panel
-    height on every tick, so it always fits the box.
+    Re-wraps and re-windows on every tick so it always fits.
     """
 
     FPS = 4
@@ -429,7 +439,6 @@ class LyricsPanel(Vertical):
         self._last_highlight: int = -1
         self._last_size: tuple[int, int] = (0, 0)
         self._fetching: bool = False
-        self._track_label: str = ""
 
     def compose(self) -> ComposeResult:
         yield Static("♪ Lyrics", id="lyr-header")
@@ -438,6 +447,18 @@ class LyricsPanel(Vertical):
     def on_mount(self) -> None:
         self.set_interval(1.0 / self.FPS, self._tick)
 
+    def on_resize(self, event) -> None:
+        # Force re-wrap on resize.
+        if self._lyrics is not None and self._lyrics.synced:
+            try:
+                size = self.query_one("#lyr-content", Static).content_size
+                self._last_size = (size.width, size.height)
+            except Exception:
+                pass
+            self.query_one("#lyr-content", Static).update(
+                self._render_synced(self._lyrics, self._last_highlight)
+            )
+
     def update_track(self, track: Track | None) -> None:
         header = self.query_one("#lyr-header", Static)
 
@@ -445,7 +466,6 @@ class LyricsPanel(Vertical):
             if self._track_key:
                 self._track_key = ""
                 self._lyrics = None
-                self._track_label = ""
                 header.update("♪ Lyrics")
                 self.query_one("#lyr-content", Static).update(
                     "[#6c7086]— nothing playing —[/]"
@@ -453,8 +473,7 @@ class LyricsPanel(Vertical):
             return
 
         key = f"{track.name}|{track.artist}"
-        self._track_label = f"♪  {track.name}  —  {track.artist}"
-        header.update(f"[#cba6f7]{escape(self._track_label)}[/]")
+        header.update(f"[#cba6f7]♪  {escape(track.name)}  —  {escape(track.artist)}[/]")
 
         if key == self._track_key:
             self._base_pos = float(track.position)
@@ -493,7 +512,7 @@ class LyricsPanel(Vertical):
             return
 
         self._lyrics = result
-        self._last_highlight = -1
+        self._last_highlight = 0
         self._render_static(result)
 
     def _render_static(self, lyrics: Lyrics) -> None:
@@ -538,7 +557,7 @@ class LyricsPanel(Vertical):
         try:
             size = self.query_one("#lyr-content", Static).content_size
             width = max(size.width, 20)
-            height = max(size.height, 6)
+            height = max(size.height, 4)
         except Exception:
             width, height = 60, 20
 
@@ -664,7 +683,13 @@ class NowPlayingBar(Container):
 
         pos = track.position
         dur = track.duration
-        bar_w = 50
+        # Progress bar width adapts to the available cell width,
+        # so on a narrow terminal the bar shrinks instead of
+        # overflowing.
+        try:
+            bar_w = max(10, min(50, self.size.width - 30))
+        except Exception:
+            bar_w = 30
         if dur > 0:
             filled = int((pos / dur) * bar_w)
             filled = max(0, min(filled, bar_w))
@@ -733,8 +758,28 @@ class LmTuiApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self._apply_layout_classes()
         asyncio.create_task(self.refresh_now_playing())
         self.set_interval(1.0, self.refresh_now_playing)
+
+    def on_resize(self, event) -> None:
+        self._apply_layout_classes()
+
+    def _apply_layout_classes(self) -> None:
+        """Toggle .compact / .minimal on the screen based on size."""
+        w = self.size.width
+        h = self.size.height
+        screen = self.screen
+
+        if w < COMPACT_WIDTH or h < COMPACT_HEIGHT:
+            screen.add_class("compact")
+        else:
+            screen.remove_class("compact")
+
+        if h < MINIMAL_HEIGHT:
+            screen.add_class("minimal")
+        else:
+            screen.remove_class("minimal")
 
     def on_unmount(self) -> None:
         self.controller.worker.shutdown()
