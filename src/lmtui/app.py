@@ -90,7 +90,6 @@ def _read_repeat() -> str:
 
 class MusicController:
     """Async wrapper around AppleScript. Owns playback state for reliable next/prev."""
-
     def __init__(self) -> None:
         self.worker = MusicWorker()
 
@@ -99,6 +98,11 @@ class MusicController:
         self._queue_pos: int = -1
         self._shuffle: bool = False
         self._repeat: str = "off"
+
+        # Serializes concurrent next()/previous() calls. Without this,
+        # rapid key presses race on _queue_pos and submit duplicate
+        # track requests to the worker.
+        self._playback_lock = asyncio.Lock()
 
     async def now_playing(self) -> Track | None:
         return await asyncio.to_thread(get_now_playing)
@@ -153,77 +157,90 @@ class MusicController:
 
         return await self.worker.run(play_playlist_track, playlist_name, index)
 
-    async def next(self) -> None:
-        if self._can_step(forward=True):
-            self._queue_pos += 1
-            idx = self._queue_order[self._queue_pos]
-            await self.worker.run(play_playlist_track, self._queue_playlist, idx)
-            return
-
-        if self._shuffle and self._queue_playlist:
-            await self._reshuffle_from_current()
-            if self._can_step(forward=True):
-                self._queue_pos += 1
-                idx = self._queue_order[self._queue_pos]
-                await self.worker.run(play_playlist_track, self._queue_playlist, idx)
-                return
-
-        if self._repeat == "all" and self._queue_playlist and self._queue_order:
-            self._queue_pos = 0
-            idx = self._queue_order[0]
-            await self.worker.run(play_playlist_track, self._queue_playlist, idx)
-            return
-
-        ok = await asyncio.to_thread(smart_next)
-        if not ok:
-            await asyncio.to_thread(next_track)
-
-    async def previous(self) -> None:
-        if self._can_step(forward=False):
-            self._queue_pos -= 1
-            idx = self._queue_order[self._queue_pos]
-            await self.worker.run(play_playlist_track, self._queue_playlist, idx)
-            return
-
-        if self._queue_playlist and 0 <= self._queue_pos:
-            idx = self._queue_order[self._queue_pos]
-            await self.worker.run(play_playlist_track, self._queue_playlist, idx)
-            return
-
-        ok = await asyncio.to_thread(smart_previous)
-        if not ok:
-            await asyncio.to_thread(previous_track)
-
     async def toggle_shuffle(self) -> None:
         await asyncio.to_thread(toggle_shuffle)
         self._shuffle = not self._shuffle
 
-        if not self._queue_playlist or self._queue_pos < 0:
-            return
+    async def next(self) -> None:
+        async with self._playback_lock:
+            if self._can_step(forward=True):
+                self._queue_pos += 1
+                idx = self._queue_order[self._queue_pos]
+                await self.worker.run(
+                    play_playlist_track, self._queue_playlist, idx
+                )
+                return
 
-        current = self._queue_order[self._queue_pos]
-        all_indices = list(range(1, len(self._queue_order) + 1))
+            if self._shuffle and self._queue_playlist:
+                await self._reshuffle_from_current()
+                if self._can_step(forward=True):
+                    self._queue_pos += 1
+                    idx = self._queue_order[self._queue_pos]
+                    await self.worker.run(
+                        play_playlist_track, self._queue_playlist, idx
+                    )
+                    return
 
-        if self._shuffle:
-            rest = [i for i in all_indices if i != current]
-            random.shuffle(rest)
-            self._queue_order = [current] + rest
-            self._queue_pos = 0
-        else:
-            self._queue_order = all_indices
-            self._queue_pos = current - 1
+            if self._repeat == "all" and self._queue_playlist and self._queue_order:
+                self._queue_pos = 0
+                idx = self._queue_order[0]
+                await self.worker.run(
+                    play_playlist_track, self._queue_playlist, idx
+                )
+                return
+
+            ok = await asyncio.to_thread(smart_next)
+            if not ok:
+                await asyncio.to_thread(next_track)
+
+    async def previous(self) -> None:
+        async with self._playback_lock:
+            if self._can_step(forward=False):
+                self._queue_pos -= 1
+                idx = self._queue_order[self._queue_pos]
+                await self.worker.run(
+                    play_playlist_track, self._queue_playlist, idx
+                )
+                return
+
+            if self._queue_playlist and 0 <= self._queue_pos:
+                idx = self._queue_order[self._queue_pos]
+                await self.worker.run(
+                    play_playlist_track, self._queue_playlist, idx
+                )
+                return
+
+            ok = await asyncio.to_thread(smart_previous)
+            if not ok:
+                await asyncio.to_thread(previous_track)
+
+            if not self._queue_playlist or self._queue_pos < 0:
+                return
+
+            current = self._queue_order[self._queue_pos]
+            all_indices = list(range(1, len(self._queue_order) + 1))
+
+            if self._shuffle:
+                rest = [i for i in all_indices if i != current]
+                random.shuffle(rest)
+                self._queue_order = [current] + rest
+                self._queue_pos = 0
+            else:
+                self._queue_order = all_indices
+                self._queue_pos = current - 1
 
     async def cycle_repeat(self) -> None:
         await asyncio.to_thread(cycle_repeat)
         self._repeat = await asyncio.to_thread(_read_repeat)
 
     async def _reshuffle_from_current(self) -> None:
-        if not self._queue_playlist:
+        if not self._queue_playlist or not self._queue_order:
             return
+        current = self._queue_order[self._queue_pos]
         n = len(self._queue_order)
-        order = list(range(1, n + 1))
-        random.shuffle(order)
-        self._queue_order = order
+        rest = [i for i in range(1, n + 1) if i != current]
+        random.shuffle(rest)
+        self._queue_order = [current] + rest
         self._queue_pos = 0
 
     def _can_step(self, *, forward: bool) -> bool:
@@ -441,7 +458,7 @@ class LyricsPanel(Vertical):
         self._fetching: bool = False
 
     def compose(self) -> ComposeResult:
-        yield Static("♪ Lyrics", id="lyr-header")
+        yield Static("♫ Lyrics", id="lyr-header")
         yield Static("", id="lyr-content")
 
     def on_mount(self) -> None:
@@ -466,14 +483,14 @@ class LyricsPanel(Vertical):
             if self._track_key:
                 self._track_key = ""
                 self._lyrics = None
-                header.update("♪ Lyrics")
+                header.update("♫ Lyrics")
                 self.query_one("#lyr-content", Static).update(
                     "[#6c7086]— nothing playing —[/]"
                 )
             return
 
         key = f"{track.name}|{track.artist}"
-        header.update(f"[#cba6f7]♪  {escape(track.name)}  —  {escape(track.artist)}[/]")
+        header.update(f"[#cba6f7]♫  {escape(track.name)}  —  {escape(track.artist)}[/]")
 
         if key == self._track_key:
             self._base_pos = float(track.position)
@@ -603,18 +620,44 @@ class LyricsPanel(Vertical):
 # ------ Small album art ------
 
 class SmallAlbumArt(Static):
-    """Fixed-size album art for the now-playing bar."""
+    """
+    Album art that scales to fit its container.
+
+    Re-renders on track change and on resize. Adds the `.empty` class
+    when there's no artwork so CSS can collapse the slot.
+    """
 
     track_key: reactive[str] = reactive("")
-    WIDTH_CELLS = 8
+    _last_size: tuple[int, int] = (0, 0)
 
     def compose(self) -> ComposeResult:
         yield Static("", id="np-art-content")
 
+    def _current_cells(self) -> tuple[int, int]:
+        try:
+            size = self.query_one("#np-art-content", Static).content_size
+            w, h = size.width, size.height
+            if w > 0 and h > 0:
+                return max(w, 4), max(h, 2)
+        except Exception:
+            pass
+        return 8, 4
+
+    def on_resize(self, event) -> None:
+        cells = self._current_cells()
+        if cells == self._last_size:
+            return
+        self._last_size = cells
+        if self.track_key:
+            asyncio.create_task(self._load_art())
+
     def watch_track_key(self, key: str) -> None:
         if not key:
+            self._last_size = (0, 0)
             self.query_one("#np-art-content", Static).update("")
+            self.add_class("empty")
             return
+        self._last_size = self._current_cells()
         asyncio.create_task(self._load_art())
 
     async def _load_art(self) -> None:
@@ -624,13 +667,15 @@ class SmallAlbumArt(Static):
         path = await asyncio.to_thread(extract_artwork)
         if path is None:
             self.query_one("#np-art-content", Static).update("")
+            self.add_class("empty")
             return
 
+        self.remove_class("empty")
+        width_cells, height_cells = self._current_cells()
         rendered = await asyncio.to_thread(
-            image_to_halfblocks, path, self.WIDTH_CELLS
+            image_to_halfblocks, path, width_cells, height_cells
         )
         self.query_one("#np-art-content", Static).update(rendered)
-
 
 # ------ Now playing bar ------
 
@@ -696,8 +741,8 @@ class NowPlayingBar(Container):
         else:
             filled = 0
         bar = (
-            "[#cba6f7]" + "▬" * filled + "[/]"
-            + "[#45475a]" + "░" * (bar_w - filled) + "[/]"
+            "[#cba6f7]" + "─" * filled + "[/]"
+            + "[#45475a]" + "─" * (bar_w - filled) + "[/]"
         )
 
         line2.update(
@@ -862,7 +907,7 @@ class LmTuiApp(App):
             )
             return
 
-        self.notify(f"Adding to \u201c{playlist_name}\u201d\u2026", timeout=2)
+        self.notify(f"Adding to \u201c{playlist_name}\u201d…", timeout=2)
         ok = await self.controller.add_current_to_playlist(playlist_name)
         if ok:
             self.notify(
