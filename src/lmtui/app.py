@@ -38,7 +38,7 @@ from lmtui.screens import (
     QueueScreen,
 )
 from lmtui.worker import MusicWorker
-
+from lmtui.visualizer import CavaVisualizer
 
 # ------ Helpers ------
 
@@ -285,18 +285,87 @@ class QueuePanel(Vertical):
 
 
 # ------ Visualizer panel (right top) ------
-
 class VisualizerPanel(Vertical):
-    """Placeholder for a cava-driven visualizer."""
+    """Audio visualizer rendering cava output as colored Unicode bars."""
+
+    FPS = 30
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self._cava = CavaVisualizer()
+        self._running = False
 
     def compose(self) -> ComposeResult:
         yield Label("♪ Visualizer", id="viz-title")
-        yield Static(
-            "[#6c7086]cava integration coming soon\n\n"
-            "meanwhile, run[/] [#cba6f7]cava[/] "
-            "[#6c7086]in a split pane[/]",
-            id="viz-content",
-        )
+        yield Static("", id="viz-content")
+
+    def on_mount(self) -> None:
+        if self._cava.start():
+            self._running = True
+            self.set_interval(1.0 / self.FPS, self._tick)
+        else:
+            self.query_one("#viz-content", Static).update(
+                "[#f38ba8]cava not found[/]\n\n"
+                "[#6c7086]Install it with:[/] "
+                "[#cba6f7]brew install cava[/]"
+            )
+
+    def on_unmount(self) -> None:
+        if self._running:
+            self._cava.stop()
+
+    def _tick(self) -> None:
+        values = self._cava.get_frame()
+        if not values:
+            return
+        content = self.query_one("#viz-content", Static)
+        content.update(self._render_frame(values))
+
+    def _render_frame(self, values: list[int]) -> str:
+        # Panel inner dimensions
+        try:
+            size = self.query_one("#viz-content", Static).content_size
+        except Exception:
+            return ""
+        width, height = size.width, size.height
+        if width < 4 or height < 2:
+            return ""
+
+        # Downsample cava bars to fit the panel width
+        if len(values) > width:
+            step = len(values) / width
+            sampled = [values[min(int(i * step), len(values) - 1)]
+                       for i in range(width)]
+        else:
+            sampled = values + [0] * (width - len(values))
+
+        # Row-based color gradient: green bottom → yellow → peach → red top
+        def color_for(row: int) -> str:
+            if height <= 1:
+                return "#a6e3a1"
+            t = 1.0 - (row / (height - 1))  # 0 = bottom, 1 = top
+            if t < 0.25: return "#a6e3a1"
+            if t < 0.50: return "#f9e2af"
+            if t < 0.75: return "#fab387"
+            return "#f38ba8"
+
+        lines: list[str] = []
+        for row in range(height):
+            dist_from_bottom = height - row  # 1 for bottom row
+            color = color_for(row)
+            cells: list[str] = []
+            for v in sampled:
+                bar_h = (v / 100.0) * height
+                if bar_h >= dist_from_bottom:
+                    cells.append(f"[{color}]\u2588[/]")       # █
+                elif bar_h >= dist_from_bottom - 0.5:
+                    cells.append(f"[{color}]\u2584[/]")       # ▄
+                elif bar_h >= dist_from_bottom - 0.75:
+                    cells.append(f"[{color}]\u2581[/]")       # ▁
+                else:
+                    cells.append(" ")
+            lines.append("".join(cells))
+        return "\n".join(lines)
 
 
 # ------ Lyrics panel (right bottom) ------
