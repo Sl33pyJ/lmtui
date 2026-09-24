@@ -126,7 +126,7 @@ class MusicController:
         return await asyncio.to_thread(current_track_count_in, name)
 
     async def shuffle_enabled(self) -> bool:
-        return await asyncio.to_thread(_read_shuffle)
+        return await self.worker.run(_read_shuffle)
 
     async def get_playlist_tracks(self, name: str) -> list[dict]:
         return await self.worker.run(get_playlist_tracks, name)
@@ -160,19 +160,9 @@ class MusicController:
     async def toggle_shuffle(self) -> None:
         await asyncio.to_thread(toggle_shuffle)
         self._shuffle = not self._shuffle
-
     async def next(self) -> None:
         async with self._playback_lock:
-            if self._can_step(forward=True):
-                self._queue_pos += 1
-                idx = self._queue_order[self._queue_pos]
-                await self.worker.run(
-                    play_playlist_track, self._queue_playlist, idx
-                )
-                return
-
-            if self._shuffle and self._queue_playlist:
-                await self._reshuffle_from_current()
+            if await self._queue_is_valid():
                 if self._can_step(forward=True):
                     self._queue_pos += 1
                     idx = self._queue_order[self._queue_pos]
@@ -181,57 +171,72 @@ class MusicController:
                     )
                     return
 
-            if self._repeat == "all" and self._queue_playlist and self._queue_order:
-                self._queue_pos = 0
-                idx = self._queue_order[0]
-                await self.worker.run(
-                    play_playlist_track, self._queue_playlist, idx
-                )
-                return
+                if self._shuffle and self._queue_playlist:
+                    await self._reshuffle_from_current()
+                    if self._can_step(forward=True):
+                        self._queue_pos += 1
+                        idx = self._queue_order[self._queue_pos]
+                        await self.worker.run(
+                            play_playlist_track, self._queue_playlist, idx
+                        )
+                        return
+
+                if (
+                    self._repeat == "all"
+                    and self._queue_playlist
+                    and self._queue_order
+                ):
+                    self._queue_pos = 0
+                    idx = self._queue_order[0]
+                    await self.worker.run(
+                        play_playlist_track, self._queue_playlist, idx
+                    )
+                    return
+            else:
+                self._invalidate_queue()
 
             ok = await asyncio.to_thread(smart_next)
             if not ok:
                 await asyncio.to_thread(next_track)
-
     async def previous(self) -> None:
         async with self._playback_lock:
-            if self._can_step(forward=False):
-                self._queue_pos -= 1
-                idx = self._queue_order[self._queue_pos]
-                await self.worker.run(
-                    play_playlist_track, self._queue_playlist, idx
-                )
-                return
+            if await self._queue_is_valid():
+                if self._can_step(forward=False):
+                    self._queue_pos -= 1
+                    idx = self._queue_order[self._queue_pos]
+                    await self.worker.run(
+                        play_playlist_track, self._queue_playlist, idx
+                    )
+                    return
 
-            if self._queue_playlist and 0 <= self._queue_pos:
-                idx = self._queue_order[self._queue_pos]
-                await self.worker.run(
-                    play_playlist_track, self._queue_playlist, idx
-                )
+                if self._queue_playlist and 0 <= self._queue_pos:
+                    idx = self._queue_order[self._queue_pos]
+                    await self.worker.run(
+                        play_playlist_track, self._queue_playlist, idx
+                    )
+                    return
+
+                current = self._queue_order[self._queue_pos]
+                all_indices = list(range(1, len(self._queue_order) + 1))
+
+                if self._shuffle:
+                    rest = [i for i in all_indices if i != current]
+                    random.shuffle(rest)
+                    self._queue_order = [current] + rest
+                    self._queue_pos = 0
+                else:
+                    self._queue_order = all_indices
+                    self._queue_pos = current - 1
                 return
+            else:
+                self._invalidate_queue()
 
             ok = await asyncio.to_thread(smart_previous)
             if not ok:
                 await asyncio.to_thread(previous_track)
-
-            if not self._queue_playlist or self._queue_pos < 0:
-                return
-
-            current = self._queue_order[self._queue_pos]
-            all_indices = list(range(1, len(self._queue_order) + 1))
-
-            if self._shuffle:
-                rest = [i for i in all_indices if i != current]
-                random.shuffle(rest)
-                self._queue_order = [current] + rest
-                self._queue_pos = 0
-            else:
-                self._queue_order = all_indices
-                self._queue_pos = current - 1
-
     async def cycle_repeat(self) -> None:
-        await asyncio.to_thread(cycle_repeat)
-        self._repeat = await asyncio.to_thread(_read_repeat)
+        await self.worker.run(cycle_repeat)
+        self._repeat = await self.worker.run(_read_repeat)
 
     async def _reshuffle_from_current(self) -> None:
         if not self._queue_playlist or not self._queue_order:
@@ -252,6 +257,37 @@ class MusicController:
             return self._queue_pos < len(self._queue_order) - 1
         return self._queue_pos > 0
 
+    async def _queue_is_valid(self) -> bool:
+        """
+        Check whether our local queue state still matches what Music.app
+        is actually playing. Returns False if playback has moved outside
+        our tracked playlist (external change via am, Music.app GUI, etc.)
+        or if we never had a queue to begin with.
+        """
+        if not self._queue_playlist or not self._queue_order:
+            return False
+        if self._queue_pos < 0 or self._queue_pos >= len(self._queue_order):
+            return False
+
+        actual = await asyncio.to_thread(get_now_playing)
+        if actual is None:
+            return False
+        if actual.playlist != self._queue_playlist:
+            return False
+        return True
+
+    def _invalidate_queue(self) -> None:
+        """Drop local queue state. Next/prev will fall back to Music.app."""
+        self._queue_playlist = None
+        self._queue_order = []
+        self._queue_pos = -1
+
+    def sync_state_from_track(self, track: Track | None) -> None:
+        """Adopt Music.app's reported shuffle/repeat state as truth."""
+        if track is None:
+            return
+        self._shuffle = track.shuffle
+        self._repeat = track.repeat or "off"
 
 # ------ Queue panel ------
 
@@ -455,7 +491,6 @@ class LyricsPanel(Vertical):
         self._base_time: float = 0.0
         self._last_highlight: int = -1
         self._last_size: tuple[int, int] = (0, 0)
-        self._fetching: bool = False
 
     def compose(self) -> ComposeResult:
         yield Static("♫ Lyrics", id="lyr-header")
@@ -506,11 +541,9 @@ class LyricsPanel(Vertical):
             "[#6c7086]loading…[/]"
         )
 
-        if not self._fetching:
-            asyncio.create_task(self._load(track))
+        asyncio.create_task(self._load(track, key))
 
-    async def _load(self, track: Track) -> None:
-        self._fetching = True
+    async def _load(self, track: Track, key: str) -> None:
         try:
             result = await asyncio.to_thread(
                 fetch_lyrics,
@@ -519,8 +552,13 @@ class LyricsPanel(Vertical):
                 track.album,
                 track.duration,
             )
-        finally:
-            self._fetching = False
+        except Exception as exc:
+            self.log(f"fetch_lyrics failed: {exc!r}")
+            return
+
+        # Discard results for tracks the user has already skipped past.
+        if self._track_key != key:
+            return
 
         if result is None:
             self.query_one("#lyr-content", Static).update(
@@ -532,6 +570,14 @@ class LyricsPanel(Vertical):
         self._last_highlight = 0
         self._render_static(result)
 
+        # Update the header with a sync indicator so unsynced lyrics
+        # aren't mistaken for a broken highlight.
+        if self._track_key == key:
+            suffix = "" if result.synced else "  [#6c7086](unsynced)[/]"
+            self.query_one("#lyr-header", Static).update(
+                f"[#cba6f7]♫  {escape(track.name)}  —  "
+                f"{escape(track.artist)}[/]{suffix}"
+            )
     def _render_static(self, lyrics: Lyrics) -> None:
         content = self.query_one("#lyr-content", Static)
         if lyrics.synced:
@@ -659,24 +705,31 @@ class SmallAlbumArt(Static):
             return
         self._last_size = self._current_cells()
         asyncio.create_task(self._load_art())
-
     async def _load_art(self) -> None:
         from lmtui.artwork import extract_artwork
         from lmtui.halfblock import image_to_halfblocks
 
-        path = await asyncio.to_thread(extract_artwork)
-        if path is None:
+        try:
+            path = await asyncio.to_thread(extract_artwork)
+            if path is None:
+                self.query_one("#np-art-content", Static).update("")
+                self.add_class("empty")
+                return
+
+            width_cells, height_cells = self._current_cells()
+            rendered = await asyncio.to_thread(
+                image_to_halfblocks, path, width_cells, height_cells
+            )
+        except Exception as exc:
+            self.log(f"album art render failed: {exc!r}")
             self.query_one("#np-art-content", Static).update("")
             self.add_class("empty")
             return
 
+        # Success path — always re-show the slot in case it was hidden
+        # by a previous track's empty state.
         self.remove_class("empty")
-        width_cells, height_cells = self._current_cells()
-        rendered = await asyncio.to_thread(
-            image_to_halfblocks, path, width_cells, height_cells
-        )
         self.query_one("#np-art-content", Static).update(rendered)
-
 # ------ Now playing bar ------
 
 class NowPlayingBar(Container):
@@ -830,7 +883,13 @@ class LmTuiApp(App):
         self.controller.worker.shutdown()
 
     async def refresh_now_playing(self) -> None:
-        track = await self.controller.now_playing()
+        try:
+            track = await self.controller.now_playing()
+        except Exception as exc:
+            self.log(f"refresh_now_playing failed: {exc!r}")
+            return
+
+        self.controller.sync_state_from_track(track)
 
         bar = self.query_one(NowPlayingBar)
         bar.track = track
